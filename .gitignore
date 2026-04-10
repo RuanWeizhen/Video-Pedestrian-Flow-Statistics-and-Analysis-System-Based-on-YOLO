@@ -1,0 +1,103 @@
+# ------------------------------
+# Python cache / bytecode
+# ------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+
+# ------------------------------
+# Virtual environments
+# ------------------------------
+.venv/
+venv/
+env/
+ENV/
+
+# ------------------------------
+# IDE / editor
+# ------------------------------
+.vscode/
+.idea/
+*.code-workspace
+
+# ------------------------------
+# OS junk
+# ------------------------------
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# ------------------------------
+# Logs / temp
+# ------------------------------
+*.log
+logs/
+*.tmp
+*.temp
+
+# ------------------------------
+# Build / packaging
+# ------------------------------
+build/
+dist/
+*.egg-info/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# ------------------------------
+# YOLO / training outputs
+# ------------------------------
+runs/
+**/runs/
+outputs/
+**/outputs/
+
+# ------------------------------
+# Datasets and generated media
+# Keep labels if you need versioning, ignore heavy assets.
+# ------------------------------
+datasets/
+**/datasets/
+make_dataset/images/
+make_dataset/videos/
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.webm
+*.jpg
+*.jpeg
+*.png
+*.bmp
+*.tif
+*.tiff
+
+# ------------------------------
+# Model weights / checkpoints (usually large)
+# ------------------------------
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.engine
+*.tflite
+*.pb
+*.weights
+*.partial
+
+# ------------------------------
+# Archives
+# ------------------------------
+*.zip
+*.rar
+*.7z
+*.tar
+*.gz
+
+# ------------------------------
+# Optional: if you want to keep a specific weight file, uncomment:
+# !yolo11n.pt
+# ------------------------------

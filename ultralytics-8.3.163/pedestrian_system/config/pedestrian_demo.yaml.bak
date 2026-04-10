@@ -1,0 +1,100 @@
+model_path: "../runs/train/yolov8s_800_sgd_rectoff/weights/best.pt"
+source: "videos/test.mp4"
+output_dir: "outputs/demo_run"
+
+detector:
+  model_path: "../runs/train/yolov8s_800_sgd_rectoff/weights/best.pt"
+  imgsz: 480
+  conf: 0.30
+  iou: 0.45
+  device: 0
+  half: true
+  class_ids: [0]
+  class_name_map:
+    0: "person"
+
+tracker:
+  max_age: 20
+  n_init: 2
+  nn_budget: 30
+  max_iou_distance: 0.90
+  max_cosine_distance: 0.35
+  embedder: null
+  embedder_gpu: false
+  half: false
+  bgr: true
+  polygon: false
+
+  # 极限提速模式
+  fast_reid: true
+  hist_bins_h: 8
+  hist_bins_s: 4
+  hist_bins_v: 4
+
+
+
+counting:
+  roi:
+    enabled: true
+    anchor_point: "bottom_center"
+    polygon:
+      - [130, 260]
+      - [1235, 260]
+      - [1100, 725]
+      - [60, 625]
+
+  line:
+    enabled: true
+    name: "main_line"
+    anchor_point: "bottom_center"
+    points:
+      - [210, 290]
+      - [1190, 470]
+    labels:
+      neg_to_pos: "up"
+      pos_to_neg: "down"
+    min_distance_to_line: 6.0
+    cooldown_frames: 36
+    dedup_window_frames: 15
+    dedup_distance_px: 30
+
+  zones:
+    - name: "main_area"
+      enabled: false
+      anchor_point: "bottom_center"
+      stale_after_frames: 45
+      cooldown_frames: 15
+      dedup_window_frames: 12
+      dedup_distance_px: 50
+      polygon:
+        - [130, 260]
+        - [1235, 260]
+        - [1100, 725]
+        - [60, 625]
+
+
+static_filter:
+  enabled: true
+  anchor_point: "bottom_center"
+  history_size: 40
+  min_static_frames: 30
+  max_movement_px: 18
+  forget_after_frames: 90
+  hide_static_boxes: true
+
+output:
+  save_video: true
+  display: true
+  video_name: "result.mp4"
+  events_csv_name: "events.csv"
+  summary_json_name: "summary.json"
+  fallback_fps: 25.0
+
+visualization:
+  trail_length: 30
+  show_confidence: true
+  box_thickness: 2
+  draw_roi: true
+
+debug:
+  draw_count_points: true
