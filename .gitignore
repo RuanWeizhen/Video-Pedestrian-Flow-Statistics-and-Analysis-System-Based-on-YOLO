@@ -59,21 +59,30 @@ outputs/
 # Datasets and generated media
 # Keep labels if you need versioning, ignore heavy assets.
 # ------------------------------
-datasets/
-**/datasets/
-make_dataset/images/
-make_dataset/videos/
-*.mp4
-*.avi
-*.mov
-*.mkv
-*.webm
-*.jpg
-*.jpeg
-*.png
-*.bmp
-*.tif
-*.tiff
+# Ignore bundled or downloaded datasets in dependency trees
+ultralytics-8.3.163/datasets/
+
+# Ignore raw media generated/collected by this project
+make_dataset/images/**
+make_dataset/videos/**
+
+# Ignore heavy media files only inside dataset-like paths
+**/datasets/**/*.mp4
+**/datasets/**/*.avi
+**/datasets/**/*.mov
+**/datasets/**/*.mkv
+**/datasets/**/*.webm
+**/datasets/**/*.jpg
+**/datasets/**/*.jpeg
+**/datasets/**/*.png
+**/datasets/**/*.bmp
+**/datasets/**/*.tif
+**/datasets/**/*.tiff
+
+# Keep annotation text files (labels)
+!make_dataset/lables/**
+!**/datasets/**/labels/**
+!**/datasets/**/*.txt
 
 # ------------------------------
 # Model weights / checkpoints (usually large)
@@ -101,3 +110,35 @@ make_dataset/videos/
 # Optional: if you want to keep a specific weight file, uncomment:
 # !yolo11n.pt
 # ------------------------------
+
+# ------------------------------
+# Strict sample-data mode
+# Keep only lightweight metadata/config files in sample-data directories.
+# ------------------------------
+**/datasets/**
+!**/datasets/**/
+!**/datasets/**/*.yaml
+!**/datasets/**/*.yml
+!**/datasets/**/*.json
+!**/datasets/**/*.txt
+
+**/data/**
+!**/data/**/
+!**/data/**/*.yaml
+!**/data/**/*.yml
+!**/data/**/*.json
+!**/data/**/*.txt
+
+**/samples/**
+!**/samples/**/
+!**/samples/**/*.yaml
+!**/samples/**/*.yml
+!**/samples/**/*.json
+!**/samples/**/*.txt
+
+**/sample/**
+!**/sample/**/
+!**/sample/**/*.yaml
+!**/sample/**/*.yml
+!**/sample/**/*.json
+!**/sample/**/*.txt
