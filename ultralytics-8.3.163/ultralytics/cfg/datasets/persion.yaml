@@ -1,0 +1,6 @@
+
+path: E:\Video Pedestrian Flow Statistics and Analysis System Based on YOLO\ultralytics-8.3.163\datasets\person9000
+train: images/train
+val: images/valid
+nc: 1
+names: ['person']

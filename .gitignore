@@ -136,6 +136,14 @@ make_dataset/videos/**
 !**/samples/**/*.json
 !**/samples/**/*.txt
 
+# ------------------------------
+# Local runtime artifacts
+# ------------------------------
+**/traffic.db
+**/ema90_best_metrics_table.csv
+**/pedestrian_system/tools/test_frame.jpg
+**/pedestrian_system/videos/
+
 **/sample/**
 !**/sample/**/
 !**/sample/**/*.yaml

@@ -1,10 +1,17 @@
 from __future__ import annotations
 
 import os
+import sys
+from pathlib import Path
 # Windows + Torch 稳定性设置
 os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["MKL_NUM_THREADS"] = "1"
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+
+# 强制优先使用本地仓库内的 ultralytics，避免命中系统 Python 的 site-packages。
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 try:
     import torch
@@ -18,7 +25,6 @@ import argparse
 import csv
 import time
 from collections import defaultdict, deque
-from pathlib import Path
 import traceback
 
 import cv2
@@ -30,6 +36,8 @@ import numpy as np
 from counting.line_counter import LineCounter
 from counting.zone_counter import ZoneCounterManager
 from detector.yolo_detector import YOLODetector
+from privacy.crypto_utils import CryptoManager
+from privacy.face_blur import FaceBlur
 from tracker.deepsort_wrapper import DeepSortTracker
 from utils.config import load_config
 from utils.filters import filter_tracks_by_roi, StaticTrackFilter
@@ -55,6 +63,16 @@ def parse_source(source_value):
     if isinstance(source_value, str) and source_value.isdigit():
         return int(source_value)
     return source_value
+
+
+def compute_adaptive_size(orig_w: int, orig_h: int, max_width: int = 1280, max_height: int = 800):
+    if orig_w <= 0 or orig_h <= 0:
+        return max_width, max_height, 1.0
+
+    scale = min(1.0, min(max_width / orig_w, max_height / orig_h))
+    new_w = max(1, int(orig_w * scale))
+    new_h = max(1, int(orig_h * scale))
+    return new_w, new_h, scale
 
 
 def save_flow_csv(flow_stats: dict, save_path: Path) -> None:
@@ -100,6 +118,10 @@ def main():
         args = parse_args()
         cfg = load_config(args.config)
 
+        privacy_cfg = cfg.get("privacy", {})
+        face_blur_cfg = privacy_cfg.get("face_blur", {})
+        encryption_cfg = privacy_cfg.get("encryption", {})
+
         source = parse_source(cfg["source"])
         print("SOURCE:", source)
         if isinstance(source, int):
@@ -114,6 +136,16 @@ def main():
         output_dir = Path(cfg["output_dir"])
         ensure_dir(output_dir)
 
+        face_blur = FaceBlur(face_blur_cfg)
+        crypto_manager = None
+        if bool(encryption_cfg.get("enabled", False)):
+            key_path = encryption_cfg.get("key_path", "secret.key")
+            try:
+                crypto_manager = CryptoManager(key_path)
+                print(f"[Privacy] Encryption enabled, key: {key_path}")
+            except Exception as exc:
+                print(f"[Privacy] Encryption init failed, continue without encryption: {exc}")
+
         cap = cv2.VideoCapture(source)
         print("cap opened:", cap.isOpened())
         if not cap.isOpened():
@@ -125,9 +157,15 @@ def main():
 
         raw_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         raw_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        proc_width, proc_height = 1280, 800
-        print(f"Video size: {raw_width}x{raw_height}, fps={fps}")
-        print(f"Process size: {proc_width}x{proc_height}")
+        max_width, max_height = 1280, 800
+        proc_width, proc_height, resize_scale = compute_adaptive_size(
+            raw_width,
+            raw_height,
+            max_width=max_width,
+            max_height=max_height,
+        )
+        print(f"Original: {raw_width}x{raw_height}, fps={fps}")
+        print(f"Resized: {proc_width}x{proc_height}, scale={resize_scale:.3f}")
 
         save_video = bool(cfg["output"].get("save_video", True))
         display = bool(cfg["output"].get("display", True))
@@ -202,7 +240,8 @@ def main():
                 break
 
             start = time.time()
-            frame = cv2.resize(frame, (proc_width, proc_height))
+            if frame.shape[1] != proc_width or frame.shape[0] != proc_height:
+                frame = cv2.resize(frame, (proc_width, proc_height))
 
             # ===== detection =====
             detections = detector.detect(frame)
@@ -388,6 +427,9 @@ def main():
                     2,
                 )
 
+            # 隐私保护仅作用在可视化输出，不影响检测/跟踪/计数。
+            annotated = face_blur.apply(annotated)
+
             # ===== display =====
             if display:
                 cv2.imshow("Pedestrian Flow System", annotated)
@@ -436,6 +478,22 @@ def main():
 
         event_logger.flush()
         save_summary_json(summary_json_path, summary)
+
+        if crypto_manager is not None:
+            remove_plaintext = bool(encryption_cfg.get("remove_plaintext", False))
+            file_targets = [
+                (events_csv_path, output_dir / "events.enc"),
+                (summary_json_path, output_dir / "summary.enc"),
+            ]
+            for src_path, enc_path in file_targets:
+                try:
+                    plain_data = src_path.read_bytes()
+                    encrypted_data = crypto_manager.encrypt(plain_data)
+                    enc_path.write_bytes(encrypted_data)
+                    if remove_plaintext and src_path.exists():
+                        src_path.unlink()
+                except Exception as exc:
+                    print(f"[Privacy] Encryption failed for {src_path}: {exc}")
 
         print("=" * 70)
         print("Processing finished.")

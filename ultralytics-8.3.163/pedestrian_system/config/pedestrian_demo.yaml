@@ -1,13 +1,13 @@
-model_path: ../runs/train/yolov8s_800_sgd_rectoff/weights/best.pt
+model_path: "E:/Video Pedestrian Flow Statistics and Analysis System Based on YOLO/ultralytics-8.3.163/runs/train/yolov8s_ema_p3_800_sgd/weights/best.pt"
 source: videos/test.mp4
 output_dir: outputs/demo_run
 detector:
-  model_path: ../runs/train/yolov8s_800_sgd_rectoff/weights/best.pt
-  imgsz: 480
+  model_path: "E:/Video Pedestrian Flow Statistics and Analysis System Based on YOLO/ultralytics-8.3.163/runs/train/yolov8s_ema_p3_800_sgd/weights/best.pt"
+  imgsz: 800
   conf: 0.3
   iou: 0.45
   device: 0
-  half: true
+  half: false
   class_ids:
   - 0
   class_name_map:
@@ -99,3 +99,15 @@ visualization:
   draw_roi: true
 debug:
   draw_count_points: true
+
+privacy:
+  face_blur:
+    enabled: false
+    model_path: "models/yolov8n-face.pt"
+    conf: 0.4
+    blur_type: "gaussian" # gaussian or mosaic
+    blur_kernel: 25
+  encryption:
+    enabled: false
+    key_path: "secret.key"
+    remove_plaintext: false

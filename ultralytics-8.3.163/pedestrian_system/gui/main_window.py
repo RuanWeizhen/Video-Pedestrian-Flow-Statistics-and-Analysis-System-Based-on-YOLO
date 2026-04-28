@@ -20,7 +20,7 @@ from .control_panel import ControlPanel
 from .event_table_panel import EventTablePanel
 from .log_panel import LogPanel
 from .stats_panel import StatsPanel
-from .trend_panel import TrendPanel
+from .trend_panel import TrendChartWidget
 from .video_panel import VideoPanel
 from .worker import WorkerThread
 
@@ -51,11 +51,11 @@ class MainWindow(QMainWindow):
 
         self.tabs = QTabWidget()
         self.log_panel = LogPanel()
-        self.trend_panel = TrendPanel()
+        self.trend_panel = TrendChartWidget()
         self.event_table_panel = EventTablePanel()
 
         self.tabs.addTab(self.log_panel, "运行日志")
-        self.tabs.addTab(self.trend_panel, "趋势图")
+        self.tabs.addTab(self.trend_panel, "流量趋势图")
         self.tabs.addTab(self.event_table_panel, "事件表")
 
         sys_info = QWidget()
@@ -216,7 +216,7 @@ class MainWindow(QMainWindow):
             if cap.isOpened():
                 ret, frame = cap.read()
                 if ret:
-                    target_size = (1280, 800)
+                    target_size = self._compute_adaptive_size(frame.shape[1], frame.shape[0])
                     if frame.shape[1] != target_size[0] or frame.shape[0] != target_size[1]:
                         frame = cv2.resize(frame, target_size)
                     rgb_image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -237,7 +237,7 @@ class MainWindow(QMainWindow):
         if cap.isOpened():
             ret, frame = cap.read()
             if ret:
-                target_size = (1280, 800)
+                target_size = self._compute_adaptive_size(frame.shape[1], frame.shape[0])
                 if frame.shape[1] != target_size[0] or frame.shape[0] != target_size[1]:
                     frame = cv2.resize(frame, target_size)
                 rgb_image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -246,6 +246,14 @@ class MainWindow(QMainWindow):
                 q_img = QImage(rgb_image.data, w, h, bytes_per_line, QImage.Format_RGB888).copy()
                 self.video_panel.update_frame(q_img)
             cap.release()
+
+    def _compute_adaptive_size(self, orig_w, orig_h, max_width=1280, max_height=800):
+        if orig_w <= 0 or orig_h <= 0:
+            return max_width, max_height
+        scale = min(1.0, min(max_width / orig_w, max_height / orig_h))
+        new_w = max(1, int(orig_w * scale))
+        new_h = max(1, int(orig_h * scale))
+        return new_w, new_h
 
     def apply_runtime_params(self, params):
         self.worker.set_runtime_params(params)
@@ -280,6 +288,8 @@ class MainWindow(QMainWindow):
 
         detector_cfg = cfg.get("detector", {})
         vis_cfg = cfg.get("visualization", {})
+        privacy_cfg = cfg.get("privacy", {})
+        face_blur_cfg = privacy_cfg.get("face_blur", {})
         counting_cfg = cfg.get("counting", {})
         line_cfg = counting_cfg.get("line", {})
         roi_cfg = counting_cfg.get("roi", {})
@@ -290,6 +300,7 @@ class MainWindow(QMainWindow):
             "show_trail": bool(vis_cfg.get("show_trail", True)),
             "show_roi": bool(vis_cfg.get("draw_roi", True)),
             "show_line": bool(vis_cfg.get("draw_line", True)),
+            "face_blur_enabled": bool(face_blur_cfg.get("enabled", False)),
         }
         self.annotation_panel.set_params(params)
 
@@ -325,6 +336,10 @@ class MainWindow(QMainWindow):
         vis_cfg["draw_roi"] = bool(params["show_roi"])
         vis_cfg["draw_line"] = bool(params["show_line"])
 
+        privacy_cfg = cfg.setdefault("privacy", {})
+        face_blur_cfg = privacy_cfg.setdefault("face_blur", {})
+        face_blur_cfg["enabled"] = bool(params.get("face_blur_enabled", False))
+
         counting_cfg = cfg.setdefault("counting", {})
         roi_cfg = counting_cfg.setdefault("roi", {})
         line_cfg = counting_cfg.setdefault("line", {})
@@ -355,6 +370,15 @@ class MainWindow(QMainWindow):
             "source": "",
             "detector": {"conf": 0.5, "iou": 0.45},
             "visualization": {"show_trail": True, "draw_roi": True, "draw_line": True},
+            "privacy": {
+                "face_blur": {
+                    "enabled": False,
+                    "model_path": "models/yolov8n-face.pt",
+                    "conf": 0.4,
+                    "blur_type": "gaussian",
+                    "blur_kernel": 25,
+                }
+            },
             "counting": {
                 "roi": {"enabled": True, "polygon": []},
                 "line": {"enabled": True, "points": []},

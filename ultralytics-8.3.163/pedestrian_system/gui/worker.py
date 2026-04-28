@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import sys
 import time
 import traceback
 from collections import defaultdict, deque
@@ -11,11 +12,17 @@ import numpy as np
 from PyQt5.QtCore import QThread, pyqtSignal
 from PyQt5.QtGui import QImage
 
+REPO_ROOT = Path(r"E:\Video Pedestrian Flow Statistics and Analysis System Based on YOLO\ultralytics-8.3.163")
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 from counting.line_counter import LineCounter
 from counting.zone_counter import ZoneCounterManager
 from detector.yolo_detector import YOLODetector
+from privacy.face_blur import FaceBlur
 from tracker.deepsort_wrapper import DeepSortTracker
 from utils.config import load_config
+from utils.db_manager import DatabaseManager
 from utils.filters import StaticTrackFilter, filter_tracks_by_roi
 from utils.io_utils import EventLogger, ensure_dir
 from utils.visualization import (
@@ -46,6 +53,7 @@ class WorkerThread(QThread):
         self.show_trail = True
         self.show_roi = True
         self.show_line = True
+        self.face_blur_enabled = False
         self.roi_points = []
         self.line_points = []
 
@@ -61,6 +69,7 @@ class WorkerThread(QThread):
         self.show_trail = bool(params.get("show_trail", self.show_trail))
         self.show_roi = bool(params.get("show_roi", self.show_roi))
         self.show_line = bool(params.get("show_line", self.show_line))
+        self.face_blur_enabled = bool(params.get("face_blur_enabled", self.face_blur_enabled))
 
     def set_annotations(self, roi_points, line_points):
         self.roi_points = [tuple(map(int, p)) for p in roi_points]
@@ -94,6 +103,10 @@ class WorkerThread(QThread):
         vis_cfg["show_trail"] = bool(self.show_trail)
         vis_cfg["draw_roi"] = bool(self.show_roi)
         vis_cfg["draw_line"] = bool(self.show_line)
+
+        privacy_cfg = cfg.setdefault("privacy", {})
+        face_blur_cfg = privacy_cfg.setdefault("face_blur", {})
+        face_blur_cfg["enabled"] = bool(self.face_blur_enabled)
 
         counting_cfg = cfg.setdefault("counting", {})
         roi_cfg = counting_cfg.setdefault("roi", {})
@@ -133,6 +146,14 @@ class WorkerThread(QThread):
             up, down = int(values[0]), int(values[1])
         return up, down
 
+    def _compute_adaptive_size(self, orig_w, orig_h, max_width=1280, max_height=800):
+        if orig_w <= 0 or orig_h <= 0:
+            return max_width, max_height, 1.0
+        scale = min(1.0, min(max_width / orig_w, max_height / orig_h))
+        new_w = max(1, int(orig_w * scale))
+        new_h = max(1, int(orig_h * scale))
+        return new_w, new_h, scale
+
     def run(self):
         self.running = True
         self.paused = False
@@ -142,6 +163,7 @@ class WorkerThread(QThread):
         try:
             cfg = self._build_runtime_config()
             source = self._parse_source(cfg.get("source", self.video_path))
+            face_blur = FaceBlur(cfg.get("privacy", {}).get("face_blur", {}))
 
             cap = cv2.VideoCapture(source)
             if not cap.isOpened():
@@ -150,6 +172,17 @@ class WorkerThread(QThread):
             fps = cap.get(cv2.CAP_PROP_FPS)
             if fps <= 1e-6:
                 fps = float(cfg.get("output", {}).get("fallback_fps", 25.0))
+
+            raw_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            raw_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            proc_width, proc_height, resize_scale = self._compute_adaptive_size(
+                raw_width,
+                raw_height,
+                max_width=1280,
+                max_height=800,
+            )
+            self.log_message.emit(f"Original: {raw_width}x{raw_height}, fps={fps:.2f}")
+            self.log_message.emit(f"Resized: {proc_width}x{proc_height}, scale={resize_scale:.3f}")
 
             output_dir = Path(cfg.get("output_dir", "outputs/gui_run"))
             ensure_dir(output_dir)
@@ -180,6 +213,10 @@ class WorkerThread(QThread):
             zone_manager = ZoneCounterManager(counting_cfg.get("zones", []))
             event_logger = EventLogger(events_csv_path)
 
+            db_manager = DatabaseManager("traffic.db")
+            db_manager.init_db()
+            last_db_insert_time = time.time()
+
             visualization_cfg = cfg.get("visualization", {})
             trail_length = int(visualization_cfg.get("trail_length", 30))
             show_confidence = bool(visualization_cfg.get("show_confidence", True))
@@ -207,10 +244,9 @@ class WorkerThread(QThread):
                     self.log_message.emit("视频结束")
                     break
 
-                # 无论输入尺寸是多少，统一缩放至 (1280, 800) 进行处理
-                target_size = (1280, 800)
-                if frame.shape[1] != target_size[0] or frame.shape[0] != target_size[1]:
-                    frame = cv2.resize(frame, target_size)
+                # 按原始宽高比自适应缩放，不拉伸。
+                if frame.shape[1] != proc_width or frame.shape[0] != proc_height:
+                    frame = cv2.resize(frame, (proc_width, proc_height))
 
                 start = time.time()
                 detector.conf = float(self.conf)
@@ -329,6 +365,9 @@ class WorkerThread(QThread):
                     2,
                 )
 
+                # 仅处理显示输出帧，不影响检测/跟踪/计数逻辑。
+                annotated = face_blur.apply(annotated)
+
                 rgb_image = cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB)
                 h, w, ch = rgb_image.shape
                 q_img = QImage(rgb_image.data, w, h, ch * w, QImage.Format_RGB888).copy()
@@ -344,14 +383,28 @@ class WorkerThread(QThread):
                 total_time += elapsed
                 fps_now = (1.0 / elapsed) if elapsed > 1e-6 else 0.0
                 up_count, down_count = self._line_up_down(line_counter)
+                
+                total_count = up_count + down_count
                 stats = {
                     "up": up_count,
                     "down": down_count,
-                    "total": up_count + down_count,
+                    "total": total_count,
                     "fps": fps_now,
                     "current": len(counting_tracks),
                 }
                 self.stats_updated.emit(stats)
+
+                # 每1秒写入一次数据库
+                current_time = time.time()
+                if current_time - last_db_insert_time >= 1.0:
+                    try:
+                        db_manager.insert_data(up_count, down_count, total_count)
+                        # 每存几十秒可以顺手清一次旧数据防膨胀
+                        if int(current_time) % 60 == 0:
+                            db_manager.delete_old_data(limit=5000)
+                    except Exception as e:
+                        self.log_message.emit(f"数据库写入异常: {e}")
+                    last_db_insert_time = current_time
 
                 if frame_idx % 60 == 0:
                     avg_fps = (total_frames / total_time) if total_time > 0 else 0.0
@@ -375,6 +428,12 @@ class WorkerThread(QThread):
                     event_logger.flush()
                 except Exception as exc:
                     self.log_message.emit(f"事件写盘失败: {exc}")
+
+            try:
+                # 结束前关闭数据库连接
+                db_manager.close()
+            except Exception:
+                pass
 
             self.running = False
             self.paused = False
