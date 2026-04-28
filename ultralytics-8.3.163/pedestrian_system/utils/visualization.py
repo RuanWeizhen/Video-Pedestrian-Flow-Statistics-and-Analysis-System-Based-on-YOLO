@@ -1,8 +1,10 @@
 from __future__ import annotations
 
-from typing import Dict
+from typing import Dict, List
 
 import cv2
+import numpy as np
+from pathlib import Path
 
 
 def draw_tracks(frame, tracks, show_conf: bool = True, box_thickness: int = 2):
@@ -113,3 +115,40 @@ def draw_counters_panel(frame, line_counter, zone_manager):
             cv2.LINE_AA,
         )
     return frame
+
+
+def save_heatmap(points: List[tuple], save_path: str | Path, width: int, height: int, sigma: int = 25) -> None:
+    """
+    生成并保存热力图（单通道密度 -> 伪彩色）
+
+    points: list of (x,y) 屏幕坐标，原点在左上
+    save_path: 输出文件路径
+    width, height: 画面尺寸
+    sigma: 高斯模糊标准差，用于扩散点密度
+    """
+    save_path = Path(save_path)
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+
+    heat = np.zeros((height, width), dtype=np.float32)
+    for p in points:
+        try:
+            x, y = int(p[0]), int(p[1])
+        except Exception:
+            continue
+        if 0 <= x < width and 0 <= y < height:
+            heat[y, x] += 1.0
+
+    if np.max(heat) <= 0:
+        # 没有点，保存一张黑图
+        blank = np.zeros((height, width, 3), dtype=np.uint8)
+        cv2.imwrite(str(save_path), blank)
+        return
+
+    # 扩散并归一化
+    ksize = (0, 0)
+    heat_blur = cv2.GaussianBlur(heat, ksize, sigmaX=sigma, sigmaY=sigma)
+    norm = cv2.normalize(heat_blur, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+
+    # 伪彩色并保存
+    heatmap = cv2.applyColorMap(norm, cv2.COLORMAP_JET)
+    cv2.imwrite(str(save_path), heatmap)

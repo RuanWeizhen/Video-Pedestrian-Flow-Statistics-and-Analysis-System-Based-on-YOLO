@@ -115,6 +115,71 @@ The program writes to `output_dir`:
 - DeepSORT is initialized as a separate tracker instance for one video stream.
 - By default, DeepSORT uses a lightweight embedder on CPU to avoid competing with YOLO for limited GPU memory.
 
+## 9. ONNX export, quantization, and benchmark
+
+This project now ships standalone tooling under `tools/`.
+
+### 9.1 Export ONNX
+
+```bash
+python tools/export_onnx.py --weights "runs/train/your_best.pt" --imgsz 800 --simplify
+```
+
+Optional flags:
+
+- `--dynamic`: export with dynamic shape/batch support
+- `--half`: export fp16 ONNX when supported by the exporter
+- `--opset`: choose ONNX opset, default `17`
+
+### 9.2 FP16 conversion
+
+```bash
+python tools/quantize_onnx.py --input exports/your_best/weights/best.onnx --output exports/your_best_fp16.onnx --mode fp16
+```
+
+### 9.3 INT8 quantization
+
+Static INT8 quantization needs a calibration image directory.
+
+```bash
+python tools/quantize_onnx.py --input exports/your_best/weights/best.onnx --output exports/your_best_int8.onnx --mode int8 --calibration-data datasets/calibration_images
+```
+
+Recommended calibration data:
+
+- 100-500 representative images
+- same scene distribution as deployment if possible
+- include day/night, occlusion, and far-distance samples
+
+### 9.4 Benchmark ONNX Runtime
+
+```bash
+python tools/benchmark_onnx.py --model exports/your_best_fp16.onnx --source videos/test.mp4 --imgsz 800 --warmup 20 --limit 200
+```
+
+If CUDA provider is installed in ONNX Runtime, you can force providers:
+
+```bash
+python tools/benchmark_onnx.py --model exports/your_best_fp16.onnx --source videos/test.mp4 --providers CUDAExecutionProvider,CPUExecutionProvider
+```
+
+### 9.5 Suggested pip packages
+
+For export and quantization, install:
+
+```bash
+pip install onnx onnxruntime onnxconverter-common
+```
+
+For GPU benchmark with ONNX Runtime, install the CUDA-enabled wheel that matches your platform.
+
+### 9.6 Workflow summary
+
+1. Export `.pt` to ONNX.
+2. Convert ONNX to FP16 or INT8.
+3. Benchmark the exported model with `benchmark_onnx.py`.
+4. Compare latency/FPS with the PyTorch pipeline.
+
 ## 8. Thesis-friendly module mapping
 
 - `detector/` -> pedestrian detection module

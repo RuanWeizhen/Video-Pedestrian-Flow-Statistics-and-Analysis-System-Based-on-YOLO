@@ -48,6 +48,7 @@ from utils.visualization import (
     draw_track_history,
     draw_tracks,
     draw_zone_counters,
+    save_heatmap,
 )
 
 
@@ -224,6 +225,15 @@ def main():
         debug_cross_buffer = []
         track_history = defaultdict(lambda: deque(maxlen=trail_length))
 
+        # 热力图累积（处理后分辨率）
+        heatmap_accum = np.zeros((proc_height, proc_width), dtype=np.float32)
+        # 持久化所有点（用于最终原始尺寸热力图保存）
+        all_points_accum = []
+        heatmap_sigma = int(visualization_cfg.get("heatmap_sigma", 40))
+        heatmap_alpha = float(visualization_cfg.get("heatmap_alpha", 0.45))
+        heatmap_interval = max(1, int(visualization_cfg.get("heatmap_interval", 5)))
+        heatmap_overlay_cache = None
+
         # 新增：每分钟客流统计
         flow_stats = defaultdict(lambda: {"up": 0, "down": 0})
 
@@ -261,6 +271,20 @@ def main():
             for tr in roi_tracks:
                 p = tr.count_point("bottom_center")
                 track_history[tr.track_id].append((int(p[0]), int(p[1])))
+
+            # 更新热力图累积（使用 ROI 轨迹点），并保存到持久列表
+            for tr in roi_tracks:
+                try:
+                    pt = tr.count_point("bottom_center")
+                    x, y = int(pt[0]), int(pt[1])
+                except Exception:
+                    continue
+                if 0 <= x < proc_width and 0 <= y < proc_height:
+                    heatmap_accum[y, x] += 1.0
+                    # 保存原始尺寸坐标（反缩放）
+                    orig_x = int(x / resize_scale) if resize_scale != 0 else x
+                    orig_y = int(y / resize_scale) if resize_scale != 0 else y
+                    all_points_accum.append((orig_x, orig_y))
 
             # ===== static filter =====
             static_ids = set()
@@ -430,6 +454,21 @@ def main():
             # 隐私保护仅作用在可视化输出，不影响检测/跟踪/计数。
             annotated = face_blur.apply(annotated)
 
+            # ===== heatmap overlay =====
+            if visualization_cfg.get("show_heatmap", True):
+                try:
+                    if frame_idx % heatmap_interval == 0:
+                        hm = heatmap_accum.copy()
+                        if np.max(hm) > 0:
+                            hm_blur = cv2.GaussianBlur(hm, (0, 0), sigmaX=heatmap_sigma, sigmaY=heatmap_sigma)
+                            hm_norm = cv2.normalize(hm_blur, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+                            heatmap_overlay_cache = cv2.applyColorMap(hm_norm, cv2.COLORMAP_JET)
+
+                    if heatmap_overlay_cache is not None:
+                        annotated = cv2.addWeighted(annotated, 1.0 - heatmap_alpha, heatmap_overlay_cache, heatmap_alpha, 0)
+                except Exception as exc:
+                    print(f"[Heatmap] overlay failed: {exc}")
+
             # ===== display =====
             if display:
                 cv2.imshow("Pedestrian Flow System", annotated)
@@ -459,6 +498,13 @@ def main():
         # 新增：输出趋势数据
         save_flow_csv(flow_stats, flow_csv_path)
         save_flow_plot(flow_stats, flow_plot_path)
+
+        # 新增：生成热力图（使用累积的所有轨迹点，原始分辨率）
+        try:
+            heatmap_path = output_dir / "heatmap.png"
+            save_heatmap(all_points_accum, heatmap_path, raw_width, raw_height, sigma=40)
+        except Exception as exc:
+            print(f"[Heatmap] 生成失败: {exc}")
 
         summary = {
             "source": str(source),

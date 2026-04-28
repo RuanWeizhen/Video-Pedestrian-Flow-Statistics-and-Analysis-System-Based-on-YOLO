@@ -53,7 +53,11 @@ class WorkerThread(QThread):
         self.show_trail = True
         self.show_roi = True
         self.show_line = True
+        self.show_heatmap = True
         self.face_blur_enabled = False
+        self.heatmap_alpha = 0.35
+        self.heatmap_sigma = 40
+        self.heatmap_interval = 5
         self.roi_points = []
         self.line_points = []
 
@@ -69,6 +73,7 @@ class WorkerThread(QThread):
         self.show_trail = bool(params.get("show_trail", self.show_trail))
         self.show_roi = bool(params.get("show_roi", self.show_roi))
         self.show_line = bool(params.get("show_line", self.show_line))
+        self.show_heatmap = bool(params.get("show_heatmap", self.show_heatmap))
         self.face_blur_enabled = bool(params.get("face_blur_enabled", self.face_blur_enabled))
 
     def set_annotations(self, roi_points, line_points):
@@ -103,6 +108,10 @@ class WorkerThread(QThread):
         vis_cfg["show_trail"] = bool(self.show_trail)
         vis_cfg["draw_roi"] = bool(self.show_roi)
         vis_cfg["draw_line"] = bool(self.show_line)
+        vis_cfg["show_heatmap"] = bool(self.show_heatmap)
+        vis_cfg.setdefault("heatmap_alpha", self.heatmap_alpha)
+        vis_cfg.setdefault("heatmap_sigma", self.heatmap_sigma)
+        vis_cfg.setdefault("heatmap_interval", self.heatmap_interval)
 
         privacy_cfg = cfg.setdefault("privacy", {})
         face_blur_cfg = privacy_cfg.setdefault("face_blur", {})
@@ -222,6 +231,12 @@ class WorkerThread(QThread):
             show_confidence = bool(visualization_cfg.get("show_confidence", True))
             box_thickness = int(visualization_cfg.get("box_thickness", 2))
             draw_count_points = bool(cfg.get("debug", {}).get("draw_count_points", True))
+            heatmap_sigma = int(visualization_cfg.get("heatmap_sigma", self.heatmap_sigma))
+            heatmap_alpha = float(visualization_cfg.get("heatmap_alpha", self.heatmap_alpha))
+            heatmap_interval = max(1, int(visualization_cfg.get("heatmap_interval", self.heatmap_interval)))
+
+            heatmap_accum = np.zeros((proc_height, proc_width), dtype=np.float32)
+            heatmap_overlay_cache = None
 
             track_history = defaultdict(lambda: deque(maxlen=trail_length))
             flow_stats = defaultdict(lambda: {"up": 0, "down": 0})
@@ -266,6 +281,8 @@ class WorkerThread(QThread):
                 for tr in roi_tracks:
                     p = tr.count_point("bottom_center")
                     track_history[tr.track_id].append((int(p[0]), int(p[1])))
+                    if 0 <= int(p[0]) < proc_width and 0 <= int(p[1]) < proc_height:
+                        heatmap_accum[int(p[1]), int(p[0])] += 1.0
 
                 static_ids = set()
                 if static_filter_enabled:
@@ -367,6 +384,20 @@ class WorkerThread(QThread):
 
                 # 仅处理显示输出帧，不影响检测/跟踪/计数逻辑。
                 annotated = face_blur.apply(annotated)
+
+                if self.show_heatmap:
+                    try:
+                        if frame_idx % heatmap_interval == 0:
+                            hm = heatmap_accum.copy()
+                            if np.max(hm) > 0:
+                                hm_blur = cv2.GaussianBlur(hm, (0, 0), sigmaX=heatmap_sigma, sigmaY=heatmap_sigma)
+                                hm_norm = cv2.normalize(hm_blur, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+                                heatmap_overlay_cache = cv2.applyColorMap(hm_norm, cv2.COLORMAP_JET)
+
+                        if heatmap_overlay_cache is not None:
+                            annotated = cv2.addWeighted(annotated, 1.0 - heatmap_alpha, heatmap_overlay_cache, heatmap_alpha, 0)
+                    except Exception as exc:
+                        self.log_message.emit(f"热力图叠加失败: {exc}")
 
                 rgb_image = cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB)
                 h, w, ch = rgb_image.shape

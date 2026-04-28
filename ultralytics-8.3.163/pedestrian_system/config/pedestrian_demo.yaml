@@ -97,6 +97,10 @@ visualization:
   show_confidence: true
   box_thickness: 2
   draw_roi: true
+  show_heatmap: true
+  heatmap_alpha: 0.35
+  heatmap_sigma: 40
+  heatmap_interval: 5
 debug:
   draw_count_points: true
 

@@ -1,16 +1,29 @@
 ﻿from pathlib import Path
 
+import sys
+import subprocess
+import shlex
 import yaml
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from PyQt5.QtWidgets import (
     QAction,
+    QCheckBox,
+    QComboBox,
+    QDialog,
+    QDialogButtonBox,
     QFileDialog,
     QHBoxLayout,
     QLabel,
     QMainWindow,
+    QDoubleSpinBox,
+    QFormLayout,
+    QGroupBox,
+    QLineEdit,
     QMessageBox,
+    QPushButton,
     QSplitter,
     QTabWidget,
+    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
@@ -25,6 +38,63 @@ from .video_panel import VideoPanel
 from .worker import WorkerThread
 
 
+class ToolOptionsDialog(QDialog):
+    def __init__(self, title: str, fields: list[tuple[str, QWidget]], parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+        self._fields = {}
+
+        for label, widget in fields:
+            self._fields[label] = widget
+            form.addRow(label, widget)
+
+        layout.addLayout(form)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def value(self, label: str):
+        widget = self._fields[label]
+        if isinstance(widget, QSpinBox):
+            return int(widget.value())
+        if isinstance(widget, QDoubleSpinBox):
+            return float(widget.value())
+        if isinstance(widget, QCheckBox):
+            return bool(widget.isChecked())
+        if isinstance(widget, QComboBox):
+            data = widget.currentData()
+            return data if data is not None else widget.currentText()
+        if isinstance(widget, QLineEdit):
+            return widget.text().strip()
+        return None
+
+
+class ToolRunnerThread(QThread):
+    log = pyqtSignal(str)
+    finished = pyqtSignal(int)
+
+    def __init__(self, cmd: list[str], cwd: str | None = None):
+        super().__init__()
+        self.cmd = cmd
+        self.cwd = cwd
+
+    def run(self):
+        try:
+            self.log.emit(f"运行命令: {' '.join(self.cmd)}")
+            proc = subprocess.Popen(self.cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, cwd=self.cwd)
+            assert proc.stdout is not None
+            for line in proc.stdout:
+                self.log.emit(line.rstrip())
+            proc.wait()
+            self.finished.emit(proc.returncode)
+        except Exception as exc:
+            self.log.emit(f"工具运行异常: {exc}")
+            self.finished.emit(-1)
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -33,6 +103,7 @@ class MainWindow(QMainWindow):
 
         self.current_config_path = None
         self.current_config = self._default_config()
+        self.tool_runners = []
 
         self.worker = WorkerThread()
         self.init_ui()
@@ -151,6 +222,10 @@ class MainWindow(QMainWindow):
         self.video_panel.line_changed.connect(self.on_annotations_changed)
 
         self.control_panel.video_selected.connect(self.on_video_selected)
+        # 模型导出/量化/benchmark 信号
+        self.control_panel.export_onnx_requested.connect(self.on_export_onnx_requested)
+        self.control_panel.quantize_onnx_requested.connect(self.on_quantize_onnx_requested)
+        self.control_panel.benchmark_onnx_requested.connect(self.on_benchmark_onnx_requested)
 
     def start_processing(self):
         video_path = self.control_panel.get_video_path()
@@ -300,6 +375,7 @@ class MainWindow(QMainWindow):
             "show_trail": bool(vis_cfg.get("show_trail", True)),
             "show_roi": bool(vis_cfg.get("draw_roi", True)),
             "show_line": bool(vis_cfg.get("draw_line", True)),
+            "show_heatmap": bool(vis_cfg.get("show_heatmap", True)),
             "face_blur_enabled": bool(face_blur_cfg.get("enabled", False)),
         }
         self.annotation_panel.set_params(params)
@@ -335,6 +411,7 @@ class MainWindow(QMainWindow):
         vis_cfg["show_trail"] = bool(params["show_trail"])
         vis_cfg["draw_roi"] = bool(params["show_roi"])
         vis_cfg["draw_line"] = bool(params["show_line"])
+        vis_cfg["show_heatmap"] = bool(params.get("show_heatmap", True))
 
         privacy_cfg = cfg.setdefault("privacy", {})
         face_blur_cfg = privacy_cfg.setdefault("face_blur", {})
@@ -369,7 +446,15 @@ class MainWindow(QMainWindow):
         return {
             "source": "",
             "detector": {"conf": 0.5, "iou": 0.45},
-            "visualization": {"show_trail": True, "draw_roi": True, "draw_line": True},
+            "visualization": {
+                "show_trail": True,
+                "draw_roi": True,
+                "draw_line": True,
+                "show_heatmap": True,
+                "heatmap_alpha": 0.35,
+                "heatmap_sigma": 40,
+                "heatmap_interval": 5,
+            },
             "privacy": {
                 "face_blur": {
                     "enabled": False,
@@ -384,3 +469,184 @@ class MainWindow(QMainWindow):
                 "line": {"enabled": True, "points": []},
             },
         }
+
+    def _start_tool_runner(self, cmd: list[str], cwd: str | None = None):
+        runner = ToolRunnerThread(cmd, cwd=cwd)
+        runner.log.connect(self.log_panel.append_log)
+        runner.finished.connect(lambda rc, ref=runner: self._on_tool_finished(ref, rc))
+        self.tool_runners.append(runner)
+        runner.start()
+
+    def _on_tool_finished(self, runner: ToolRunnerThread, return_code: int):
+        self.log_panel.append_log(f"工具退出，返回码: {return_code}")
+        if runner in self.tool_runners:
+            self.tool_runners.remove(runner)
+        runner.deleteLater()
+
+    def _show_tool_dialog(self, title: str, fields: list[tuple[str, QWidget]]):
+        dialog = ToolOptionsDialog(title, fields, self)
+        result = dialog.exec_()
+        if result != QDialog.Accepted:
+            return None
+        return dialog
+
+    def on_export_onnx_requested(self):
+        weights, _ = QFileDialog.getOpenFileName(self, "选择权重文件 (.pt)", "", "PyTorch Weights (*.pt *.pth)")
+        if not weights:
+            return
+        out_dir = QFileDialog.getExistingDirectory(self, "选择导出目录", str(Path(weights).parent))
+        if not out_dir:
+            return
+
+        imgsz = QSpinBox()
+        imgsz.setRange(32, 4096)
+        imgsz.setSingleStep(32)
+        imgsz.setValue(800)
+
+        opset = QSpinBox()
+        opset.setRange(7, 25)
+        opset.setValue(17)
+
+        simplify = QCheckBox("启用 ONNX 简化")
+        simplify.setChecked(True)
+
+        dynamic = QCheckBox("动态 batch/shape")
+        dynamic.setChecked(False)
+
+        half = QCheckBox("导出 FP16")
+        half.setChecked(False)
+
+        dialog = self._show_tool_dialog(
+            "ONNX 导出选项",
+            [
+                ("imgsz", imgsz),
+                ("opset", opset),
+                ("simplify", simplify),
+                ("dynamic", dynamic),
+                ("half", half),
+            ],
+        )
+        if dialog is None:
+            return
+
+        cmd = [
+            sys.executable,
+            str(Path(__file__).resolve().parents[1] / "tools" / "export_onnx.py"),
+            "--weights",
+            weights,
+            "--output-dir",
+            out_dir,
+            "--imgsz",
+            str(dialog.value("imgsz")),
+            "--opset",
+            str(dialog.value("opset")),
+        ]
+        if dialog.value("simplify"):
+            cmd.append("--simplify")
+        if dialog.value("dynamic"):
+            cmd.append("--dynamic")
+        if dialog.value("half"):
+            cmd.append("--half")
+        self._start_tool_runner(cmd, cwd=str(Path(__file__).resolve().parents[1]))
+
+    def on_quantize_onnx_requested(self):
+        model_path, _ = QFileDialog.getOpenFileName(self, "选择输入 ONNX 模型", "", "ONNX Model (*.onnx)")
+        if not model_path:
+            return
+        out_path, _ = QFileDialog.getSaveFileName(self, "保存量化后模型为", str(Path(model_path).with_suffix(".quant.onnx")), "ONNX Model (*.onnx)")
+        if not out_path:
+            return
+
+        mode = QComboBox()
+        mode.addItem("FP16", "fp16")
+        mode.addItem("INT8", "int8")
+
+        input_name = QLineEdit("images")
+        calibration_dir = QLineEdit("")
+
+        dialog = self._show_tool_dialog(
+            "ONNX 量化选项",
+            [
+                ("mode", mode),
+                ("input_name", input_name),
+                ("calibration_dir", calibration_dir),
+            ],
+        )
+        if dialog is None:
+            return
+
+        quant_mode = str(dialog.value("mode"))
+        cmd = [
+            sys.executable,
+            str(Path(__file__).resolve().parents[1] / "tools" / "quantize_onnx.py"),
+            "--input",
+            model_path,
+            "--output",
+            out_path,
+            "--mode",
+            quant_mode,
+            "--input-name",
+            dialog.value("input_name") or "images",
+        ]
+        if quant_mode == "int8":
+            calib_dir = dialog.value("calibration_dir")
+            if not calib_dir:
+                self.log_panel.append_log("取消 INT8 量化：未选择校准目录")
+                return
+            cmd.extend(["--calibration-data", calib_dir])
+
+        self._start_tool_runner(cmd, cwd=str(Path(__file__).resolve().parents[1]))
+
+    def on_benchmark_onnx_requested(self):
+        model_path, _ = QFileDialog.getOpenFileName(self, "选择 ONNX 模型", "", "ONNX Model (*.onnx)")
+        if not model_path:
+            return
+
+        source = QLineEdit(self.control_panel.get_video_path() or "0")
+        imgsz = QSpinBox()
+        imgsz.setRange(32, 4096)
+        imgsz.setSingleStep(32)
+        imgsz.setValue(800)
+
+        warmup = QSpinBox()
+        warmup.setRange(0, 10000)
+        warmup.setValue(10)
+
+        limit = QSpinBox()
+        limit.setRange(1, 100000)
+        limit.setValue(300)
+
+        providers = QLineEdit("")
+
+        dialog = self._show_tool_dialog(
+            "ONNX Benchmark 选项",
+            [
+                ("source", source),
+                ("imgsz", imgsz),
+                ("warmup", warmup),
+                ("limit", limit),
+                ("providers", providers),
+            ],
+        )
+        if dialog is None:
+            return
+
+        cmd = [
+            sys.executable,
+            str(Path(__file__).resolve().parents[1] / "tools" / "benchmark_onnx.py"),
+            "--model",
+            model_path,
+            "--source",
+            dialog.value("source") or "0",
+            "--imgsz",
+            str(dialog.value("imgsz")),
+            "--warmup",
+            str(dialog.value("warmup")),
+            "--limit",
+            str(dialog.value("limit")),
+        ]
+        provider_text = dialog.value("providers")
+        if provider_text:
+            cmd.extend(["--providers", provider_text])
+
+        self._start_tool_runner(cmd, cwd=str(Path(__file__).resolve().parents[1]))

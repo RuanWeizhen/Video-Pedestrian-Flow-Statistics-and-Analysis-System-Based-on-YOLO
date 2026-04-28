@@ -53,12 +53,15 @@ class AnnotationPanel(QWidget):
         self.chk_line.setChecked(True)
         self.chk_trail = QCheckBox("显示轨迹")
         self.chk_trail.setChecked(True)
+        self.chk_heatmap = QCheckBox("显示热力图")
+        self.chk_heatmap.setChecked(True)
         self.chk_face_blur = QCheckBox("人脸模糊（隐私保护）")
         self.chk_face_blur.setChecked(False)
 
         vbox.addWidget(self.chk_roi)
         vbox.addWidget(self.chk_line)
         vbox.addWidget(self.chk_trail)
+        vbox.addWidget(self.chk_heatmap)
         vbox.addWidget(self.chk_face_blur)
 
         # 标注按钮
@@ -80,6 +83,7 @@ class AnnotationPanel(QWidget):
         self.chk_roi.toggled.connect(self._emit_params)
         self.chk_line.toggled.connect(self._emit_params)
         self.chk_trail.toggled.connect(self._emit_params)
+        self.chk_heatmap.toggled.connect(self._emit_params)
         self.chk_face_blur.toggled.connect(self._emit_params)
 
         self.btn_draw_roi.clicked.connect(lambda: self.draw_mode_changed.emit("roi"))
@@ -97,6 +101,7 @@ class AnnotationPanel(QWidget):
             "show_roi": bool(self.chk_roi.isChecked()),
             "show_line": bool(self.chk_line.isChecked()),
             "show_trail": bool(self.chk_trail.isChecked()),
+            "show_heatmap": bool(self.chk_heatmap.isChecked()),
             "face_blur_enabled": bool(self.chk_face_blur.isChecked()),
         }
 
@@ -106,6 +111,7 @@ class AnnotationPanel(QWidget):
         self.chk_roi.blockSignals(True)
         self.chk_line.blockSignals(True)
         self.chk_trail.blockSignals(True)
+        self.chk_heatmap.blockSignals(True)
         self.chk_face_blur.blockSignals(True)
 
         self.spin_conf.setValue(float(params.get("conf", self.spin_conf.value())))
@@ -113,6 +119,7 @@ class AnnotationPanel(QWidget):
         self.chk_roi.setChecked(bool(params.get("show_roi", self.chk_roi.isChecked())))
         self.chk_line.setChecked(bool(params.get("show_line", self.chk_line.isChecked())))
         self.chk_trail.setChecked(bool(params.get("show_trail", self.chk_trail.isChecked())))
+        self.chk_heatmap.setChecked(bool(params.get("show_heatmap", self.chk_heatmap.isChecked())))
         self.chk_face_blur.setChecked(bool(params.get("face_blur_enabled", self.chk_face_blur.isChecked())))
 
         self.spin_conf.blockSignals(False)
@@ -120,6 +127,7 @@ class AnnotationPanel(QWidget):
         self.chk_roi.blockSignals(False)
         self.chk_line.blockSignals(False)
         self.chk_trail.blockSignals(False)
+        self.chk_heatmap.blockSignals(False)
         self.chk_face_blur.blockSignals(False)
 
         self._emit_params()
