@@ -30,12 +30,14 @@ def draw_tracks(frame, tracks, show_conf: bool = True, box_thickness: int = 2):
 
 
 def draw_track_history(frame, track_history):
-    for _, points in track_history.items():
+    for points in track_history.values():
         if len(points) < 2:
             continue
-        pts = list(points)
-        for i in range(1, len(pts)):
-            cv2.line(frame, pts[i - 1], pts[i], (255, 180, 0), 2, cv2.LINE_AA)
+        pts = np.asarray(points, dtype=np.int32)
+        if pts.ndim != 2 or pts.shape[0] < 2 or pts.shape[1] != 2:
+            continue
+        pts = pts.reshape((-1, 1, 2))
+        cv2.polylines(frame, [pts], isClosed=False, color=(255, 180, 0), thickness=2, lineType=cv2.LINE_AA)
     return frame
 
 
@@ -99,9 +101,18 @@ def draw_counters_panel(frame, line_counter, zone_manager):
 
     panel_width = 700
     panel_height = 15 + len(texts) * line_height
-    overlay = frame.copy()
-    cv2.rectangle(overlay, (10, 10), (10 + panel_width, 10 + panel_height), (30, 30, 30), -1)
-    frame = cv2.addWeighted(overlay, 0.45, frame, 0.55, 0)
+
+    # 只对面板区域做 alpha 混合，避免整帧 copy + addWeighted（大幅降低带宽开销）
+    h, w = frame.shape[:2]
+    x1, y1 = 10, 10
+    x2 = min(w, 10 + panel_width)
+    y2 = min(h, 10 + panel_height)
+    if x2 > x1 and y2 > y1:
+        roi = frame[y1:y2, x1:x2]
+        overlay = roi.copy()
+        cv2.rectangle(overlay, (0, 0), (x2 - x1, y2 - y1), (30, 30, 30), -1)
+        blended = cv2.addWeighted(overlay, 0.45, roi, 0.55, 0)
+        frame[y1:y2, x1:x2] = blended
 
     for idx, text in enumerate(texts):
         cv2.putText(

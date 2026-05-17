@@ -7,11 +7,17 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from .main_window import MainWindow
+from .auth_dialog import AuthDialog
 
 def run_app():
     import sys
-    from PyQt5.QtWidgets import QApplication
+    from PyQt5.QtWidgets import QApplication, QDialog
+
     app = QApplication(sys.argv)
-    window = MainWindow()
+    auth_dialog = AuthDialog()
+    if auth_dialog.exec_() != QDialog.Accepted or not auth_dialog.current_user:
+        sys.exit(0)
+
+    window = MainWindow(current_user=auth_dialog.current_user)
     window.show()
     sys.exit(app.exec_())

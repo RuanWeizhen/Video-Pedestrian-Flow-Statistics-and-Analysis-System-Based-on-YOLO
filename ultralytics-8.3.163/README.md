@@ -1,3 +1,5 @@
+
+程序启动后会先进入登录/注册页面。你需要先选择身份并完成登录，之后才能进入主页面。若没有账号，可以先注册；如果账号已存在，系统会直接提示。
 <div align="center">
   <p>
     <a href="https://www.ultralytics.com/blog/ultralytics-yolo11-has-arrived-redefine-whats-possible-in-ai" target="_blank">

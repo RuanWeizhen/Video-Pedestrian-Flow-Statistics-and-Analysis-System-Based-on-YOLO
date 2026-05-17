@@ -1,5 +1,6 @@
 from PyQt5.QtWidgets import QWidget, QVBoxLayout, QTableWidget, QTableWidgetItem, QHeaderView
 from PyQt5.QtCore import Qt
+import csv
 
 class EventTablePanel(QWidget):
     def __init__(self):
@@ -9,7 +10,7 @@ class EventTablePanel(QWidget):
     def init_ui(self):
         layout = QVBoxLayout(self)
         self.table = QTableWidget(0, 4)
-        self.table.setHorizontalHeaderLabels(["时间", "事件", "ID", "目标"])
+        self.table.setHorizontalHeaderLabels(["时间", "事件类型", "目标ID", "计数线名称"])
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         layout.addWidget(self.table)
 
@@ -36,3 +37,25 @@ class EventTablePanel(QWidget):
         track_id = event.get("track_id", "")
         target = str(event.get("target", ""))
         self.add_event(timestamp, event_name, track_id, target)
+
+    def set_records(self, records):
+        self.reset()
+        for item in records:
+            self.add_event(
+                str(item.get("timestamp", "")),
+                str(item.get("event", "")),
+                str(item.get("track_id", "")),
+                str(item.get("target", "")),
+            )
+
+    def export_csv(self, file_path):
+        with open(file_path, "w", encoding="utf-8-sig", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["时间", "事件", "ID", "目标"])
+            for row in range(self.table.rowCount()):
+                writer.writerow([
+                    self.table.item(row, 0).text() if self.table.item(row, 0) else "",
+                    self.table.item(row, 1).text() if self.table.item(row, 1) else "",
+                    self.table.item(row, 2).text() if self.table.item(row, 2) else "",
+                    self.table.item(row, 3).text() if self.table.item(row, 3) else "",
+                ])

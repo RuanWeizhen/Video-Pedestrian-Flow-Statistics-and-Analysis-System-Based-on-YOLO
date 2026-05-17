@@ -16,25 +16,73 @@ from utils.common import Detection
 
 class YOLODetector:
     def __init__(self, cfg: Dict):
-        self.cfg = cfg
-        self.model_path = cfg["model_path"]
-        self.imgsz = int(cfg.get("imgsz", 640))
-        self.conf = float(cfg.get("conf", 0.25))
-        self.iou = float(cfg.get("iou", 0.45))
-        self.device = cfg.get("device", 0)
-        self.half = bool(cfg.get("half", False))
-        self.class_ids = set(cfg.get("class_ids", [0]))
-        self.class_name_map = cfg.get("class_name_map", {0: "person"})
+        self.cfg = {}
+        self.model_path = ""
+        self.imgsz = 640
+        self.conf = 0.25
+        self.iou = 0.45
+        self.device = 0
+        self.half = False
+        self.class_ids = {0}
+        self.class_name_map = {0: "person"}
 
-        self.model = YOLO(self.model_path)
-        
-        # 为了兼容在无GPU机器上直接报错回退到CPU而不等 predict 阶段，
-        # 在这里执行一次快速设备检查
-        import torch
-        if str(self.device) != "cpu" and not torch.cuda.is_available():
-            raise RuntimeError("CUDA is not available, forced to raise early")
+        self.model = None
+        self.configure(cfg, load_model=True)
+
+    def configure(self, cfg: Dict, load_model: bool = False) -> None:
+        self.cfg = dict(cfg)
+        self.model_path = self.cfg["model_path"]
+        self.imgsz = int(self.cfg.get("imgsz", self.imgsz))
+        self.conf = float(self.cfg.get("conf", self.conf))
+        self.iou = float(self.cfg.get("iou", self.iou))
+        self.device = self.cfg.get("device", self.device)
+        self.half = bool(self.cfg.get("half", self.half))
+        self.class_ids = set(self.cfg.get("class_ids", [0]))
+        self.class_name_map = dict(self.cfg.get("class_name_map", {0: "person"}))
+
+        if load_model or self.model is None:
+            self.model = YOLO(self.model_path)
+
+        self._normalize_device()
+
+    def apply_runtime_params(self, conf: float | None = None, iou: float | None = None) -> None:
+        if conf is not None:
+            self.conf = float(conf)
+        if iou is not None:
+            self.iou = float(iou)
+
+    def _normalize_device(self) -> None:
+        try:
+            import torch
+        except ImportError:
+            self.device = "cpu"
+            self.half = False
+            return
+
+        device_str = str(self.device).strip().lower()
+        if device_str == "cpu":
+            self.device = "cpu"
+            self.half = False
+            return
+
+        if not torch.cuda.is_available():
+            self.device = "cpu"
+            self.half = False
+            return
+
+        if device_str in {"cuda", "cuda:0", "0", "gpu", "gpu:0"}:
+            self.device = 0
+            return
+
+        self.device = self.device
 
     def detect(self, frame) -> List[Detection]:
+        if self.model is None:
+            self.model = YOLO(self.model_path)
+
+        # 仅检测指定类别：减少 NMS/后处理开销
+        classes = sorted(self.class_ids) if self.class_ids else None
+
         result = next(
             self.model.predict(
                 source=frame,
@@ -43,17 +91,24 @@ class YOLODetector:
                 iou=self.iou,
                 device=self.device,
                 half=self.half,
+                classes=classes,
                 verbose=False,
                 stream=True,
             )
-        ).cpu()
+        )
 
-        if result.boxes is None or len(result.boxes) == 0:
+        boxes = result.boxes
+        if boxes is None or len(boxes) == 0:
             return []
 
-        xyxy = result.boxes.xyxy.numpy()
-        confs = result.boxes.conf.numpy()
-        clss = result.boxes.cls.numpy()
+        xyxy = boxes.xyxy
+        confs = boxes.conf
+        clss = boxes.cls
+
+        # 只把必要张量搬到 CPU
+        xyxy = xyxy.cpu().numpy()
+        confs = confs.cpu().numpy()
+        clss = clss.cpu().numpy()
 
         detections: List[Detection] = []
         for box, conf, cls_id_float in zip(xyxy, confs, clss):

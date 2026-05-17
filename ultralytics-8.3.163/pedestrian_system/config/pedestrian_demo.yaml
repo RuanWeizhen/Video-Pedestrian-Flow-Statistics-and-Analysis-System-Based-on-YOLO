@@ -1,9 +1,18 @@
-model_path: "E:/Video Pedestrian Flow Statistics and Analysis System Based on YOLO/ultralytics-8.3.163/runs/train/yolov8s_ema_p3_800_sgd/weights/best.pt"
+model_path: "E:/Video Pedestrian Flow Statistics and Analysis System Based on YOLO/ultralytics-8.3.163/runs/train/yolov8m_ema_p3_896_sgd_cloud/weights/best.pt"
 source: videos/test.mp4
 output_dir: outputs/demo_run
+
+# 性能相关（不影响计数逻辑）：限制 UI 刷新/曲线重绘频率 + 处理分辨率上限
+performance:
+  ui_max_fps: 15.0
+  stats_hz: 10.0
+  trend_hz: 2.0
+  max_width: 1280
+  max_height: 800
+
 detector:
-  model_path: "E:/Video Pedestrian Flow Statistics and Analysis System Based on YOLO/ultralytics-8.3.163/runs/train/yolov8s_ema_p3_800_sgd/weights/best.pt"
-  imgsz: 800
+  model_path: "E:/Video Pedestrian Flow Statistics and Analysis System Based on YOLO/ultralytics-8.3.163/runs/train/yolov8m_ema_p3_896_sgd_cloud/weights/best.pt"
+  imgsz: 512
   conf: 0.3
   iou: 0.45
   device: 0

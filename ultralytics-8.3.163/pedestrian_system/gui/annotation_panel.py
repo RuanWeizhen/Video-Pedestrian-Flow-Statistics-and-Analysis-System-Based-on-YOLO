@@ -5,6 +5,7 @@ from PyQt5.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QPlainTextEdit,
     QPushButton,
     QVBoxLayout,
     QWidget,
@@ -14,7 +15,9 @@ class AnnotationPanel(QWidget):
     params_changed = pyqtSignal(dict)
     draw_mode_changed = pyqtSignal(str)
     clear_requested = pyqtSignal()
+    undo_requested = pyqtSignal()
     save_config_requested = pyqtSignal()
+    load_config_requested = pyqtSignal()
 
     def __init__(self):
         super().__init__()
@@ -57,23 +60,41 @@ class AnnotationPanel(QWidget):
         self.chk_heatmap.setChecked(True)
         self.chk_face_blur = QCheckBox("人脸模糊（隐私保护）")
         self.chk_face_blur.setChecked(False)
+        self.chk_count_point = QCheckBox("显示 count_point 调试点")
+        self.chk_count_point.setChecked(True)
 
         vbox.addWidget(self.chk_roi)
         vbox.addWidget(self.chk_line)
         vbox.addWidget(self.chk_trail)
         vbox.addWidget(self.chk_heatmap)
         vbox.addWidget(self.chk_face_blur)
+        vbox.addWidget(self.chk_count_point)
 
         # 标注按钮
         self.btn_draw_roi = QPushButton("绘制 ROI")
         self.btn_draw_line = QPushButton("绘制 Line")
+        self.btn_undo = QPushButton("撤销上一个标注点")
         self.btn_clear = QPushButton("清空标注")
+        self.btn_load_cfg = QPushButton("导入配置")
         self.btn_save_cfg = QPushButton("保存配置")
 
         vbox.addWidget(self.btn_draw_roi)
         vbox.addWidget(self.btn_draw_line)
+        vbox.addWidget(self.btn_undo)
         vbox.addWidget(self.btn_clear)
+        vbox.addWidget(self.btn_load_cfg)
         vbox.addWidget(self.btn_save_cfg)
+
+        coord_group = QGroupBox("ROI / Line 坐标")
+        coord_layout = QVBoxLayout()
+        self.txt_coords = QPlainTextEdit()
+        self.txt_coords.setReadOnly(True)
+        self.txt_coords.setMinimumHeight(120)
+        self.txt_coords.setPlainText("ROI 和 Line 坐标会显示在这里")
+        coord_layout.addWidget(self.txt_coords)
+        coord_group.setLayout(coord_layout)
+
+        vbox.addWidget(coord_group)
 
         group.setLayout(vbox)
         layout.addWidget(group)
@@ -85,10 +106,13 @@ class AnnotationPanel(QWidget):
         self.chk_trail.toggled.connect(self._emit_params)
         self.chk_heatmap.toggled.connect(self._emit_params)
         self.chk_face_blur.toggled.connect(self._emit_params)
+        self.chk_count_point.toggled.connect(self._emit_params)
 
         self.btn_draw_roi.clicked.connect(lambda: self.draw_mode_changed.emit("roi"))
         self.btn_draw_line.clicked.connect(lambda: self.draw_mode_changed.emit("line"))
+        self.btn_undo.clicked.connect(self.undo_requested.emit)
         self.btn_clear.clicked.connect(self.clear_requested.emit)
+        self.btn_load_cfg.clicked.connect(self.load_config_requested.emit)
         self.btn_save_cfg.clicked.connect(self.save_config_requested.emit)
 
     def _emit_params(self):
@@ -103,6 +127,7 @@ class AnnotationPanel(QWidget):
             "show_trail": bool(self.chk_trail.isChecked()),
             "show_heatmap": bool(self.chk_heatmap.isChecked()),
             "face_blur_enabled": bool(self.chk_face_blur.isChecked()),
+            "draw_count_points": bool(self.chk_count_point.isChecked()),
         }
 
     def set_params(self, params):
@@ -113,6 +138,7 @@ class AnnotationPanel(QWidget):
         self.chk_trail.blockSignals(True)
         self.chk_heatmap.blockSignals(True)
         self.chk_face_blur.blockSignals(True)
+        self.chk_count_point.blockSignals(True)
 
         self.spin_conf.setValue(float(params.get("conf", self.spin_conf.value())))
         self.spin_iou.setValue(float(params.get("iou", self.spin_iou.value())))
@@ -121,6 +147,7 @@ class AnnotationPanel(QWidget):
         self.chk_trail.setChecked(bool(params.get("show_trail", self.chk_trail.isChecked())))
         self.chk_heatmap.setChecked(bool(params.get("show_heatmap", self.chk_heatmap.isChecked())))
         self.chk_face_blur.setChecked(bool(params.get("face_blur_enabled", self.chk_face_blur.isChecked())))
+        self.chk_count_point.setChecked(bool(params.get("draw_count_points", self.chk_count_point.isChecked())))
 
         self.spin_conf.blockSignals(False)
         self.spin_iou.blockSignals(False)
@@ -129,5 +156,26 @@ class AnnotationPanel(QWidget):
         self.chk_trail.blockSignals(False)
         self.chk_heatmap.blockSignals(False)
         self.chk_face_blur.blockSignals(False)
+        self.chk_count_point.blockSignals(False)
 
         self._emit_params()
+
+    def update_annotation_coords(self, roi_points=None, line_points=None):
+        roi_points = roi_points or []
+        line_points = line_points or []
+
+        roi_lines = ["ROI 坐标:"]
+        if roi_points:
+            for idx, point in enumerate(roi_points, start=1):
+                roi_lines.append(f"  {idx}. ({int(point[0])}, {int(point[1])})")
+        else:
+            roi_lines.append("  无")
+
+        line_lines = ["Line 坐标:"]
+        if line_points:
+            for idx, point in enumerate(line_points[:2], start=1):
+                line_lines.append(f"  P{idx}: ({int(point[0])}, {int(point[1])})")
+        else:
+            line_lines.append("  无")
+
+        self.txt_coords.setPlainText("\n".join(roi_lines + [""] + line_lines))

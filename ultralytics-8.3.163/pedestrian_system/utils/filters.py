@@ -122,9 +122,17 @@ class StaticTrackFilter:
                 continue
 
             x0, y0 = hist[0]
-            max_move = max(hypot(x - x0, y - y0) for x, y in hist)
+            # 等价于 max(hypot(...)) <= threshold，但用平方距离避免 sqrt，并支持早停
+            threshold_sq = self.max_movement_px * self.max_movement_px
+            is_static = True
+            for x, y in hist:
+                dx = x - x0
+                dy = y - y0
+                if (dx * dx + dy * dy) > threshold_sq:
+                    is_static = False
+                    break
 
-            if max_move <= self.max_movement_px:
+            if is_static:
                 static_ids.add(track_id)
 
         self._purge_stale(frame_idx)

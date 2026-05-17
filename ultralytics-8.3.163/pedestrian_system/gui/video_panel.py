@@ -15,6 +15,7 @@ class VideoPanel(QWidget):
         self._line_points = []
         self._show_roi = True
         self._show_line = True
+        self._current_pixmap = QPixmap()
         self.init_ui()
 
     def init_ui(self):
@@ -31,7 +32,8 @@ class VideoPanel(QWidget):
         self._render()
 
     def update_frame(self, q_img):
-        self._frame_image = q_img.copy()
+        # worker 侧已经做过 QImage.copy() 以保证跨线程安全，这里避免二次深拷贝。
+        self._frame_image = q_img
         self._render()
 
     def set_draw_mode(self, mode):
@@ -57,6 +59,18 @@ class VideoPanel(QWidget):
         self.roi_changed.emit([])
         self.line_changed.emit([])
         self._render()
+
+    def undo_last_annotation_point(self):
+        if self._draw_mode == "roi":
+            if self._roi_points:
+                self._roi_points.pop()
+                self.roi_changed.emit(list(self._roi_points))
+                self._render()
+        elif self._draw_mode == "line":
+            if self._line_points:
+                self._line_points.pop()
+                self.line_changed.emit(list(self._line_points))
+                self._render()
 
     def eventFilter(self, obj, event):
         if obj is self.label and event.type() == QEvent.MouseButtonPress and self._draw_mode:
@@ -123,7 +137,14 @@ class VideoPanel(QWidget):
             self._image_rect = QRect()
 
         painter.end()
+        # QPixmap 是隐式共享的；这里不做 deep copy，节省每帧内存拷贝。
+        self._current_pixmap = canvas
         self.label.setPixmap(canvas)
+
+    def save_current_frame(self, file_path):
+        if self._current_pixmap.isNull():
+            return False
+        return bool(self._current_pixmap.save(str(file_path)))
 
     def _display_to_frame(self, point):
         if self._frame_image is None or self._image_rect.isNull():

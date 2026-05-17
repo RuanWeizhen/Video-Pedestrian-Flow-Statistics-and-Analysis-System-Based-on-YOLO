@@ -4,6 +4,7 @@ import os
 
 class ControlPanel(QWidget):
     video_selected = pyqtSignal(str)
+    save_frame_requested = pyqtSignal()
     export_onnx_requested = pyqtSignal()
     quantize_onnx_requested = pyqtSignal()
     benchmark_onnx_requested = pyqtSignal()
@@ -37,6 +38,7 @@ class ControlPanel(QWidget):
         self.btn_stop = QPushButton("停止")
         self.btn_pause.setEnabled(False)
         self.btn_stop.setEnabled(False)
+        self.btn_save_frame = QPushButton("保存当前画面")
         self.btn_export = QPushButton("导出结果")
         # 模型导出/量化/benchmark
         self.btn_export_onnx = QPushButton("导出 ONNX")
@@ -46,6 +48,7 @@ class ControlPanel(QWidget):
         hbox_ctrl.addWidget(self.btn_start)
         hbox_ctrl.addWidget(self.btn_pause)
         hbox_ctrl.addWidget(self.btn_stop)
+        hbox_ctrl.addWidget(self.btn_save_frame)
         hbox_ctrl.addWidget(self.btn_export)
         hbox_ctrl.addWidget(self.btn_export_onnx)
         hbox_ctrl.addWidget(self.btn_quantize)
@@ -57,6 +60,7 @@ class ControlPanel(QWidget):
         
         self.btn_select.clicked.connect(self.select_video)
         self.btn_select_camera.clicked.connect(self.select_camera)
+        self.btn_save_frame.clicked.connect(self.save_frame_requested.emit)
         self.btn_export_onnx.clicked.connect(lambda: self.export_onnx_requested.emit())
         self.btn_quantize.clicked.connect(lambda: self.quantize_onnx_requested.emit())
         self.btn_benchmark.clicked.connect(lambda: self.benchmark_onnx_requested.emit())
