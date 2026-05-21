@@ -1,0 +1,47 @@
+source: E:/Video Pedestrian Flow Statistics and Analysis System Based on YOLO/ultralytics-8.3.163/pedestrian_system/videos/test.mp4
+performance:
+  ui_max_fps: 15.0
+  stats_hz: 10.0
+  trend_hz: 2.0
+  max_width: 1280
+  max_height: 800
+detector:
+  model_path: E:/Video Pedestrian Flow Statistics and Analysis System Based on YOLO/ultralytics-8.3.163/runs/train/yolov8m_ema_p3_896_sgd_cloud/weights/best.pt
+  conf: 0.07
+  iou: 0.5
+visualization:
+  show_trail: true
+  draw_roi: true
+  draw_line: true
+  show_heatmap: false
+  heatmap_alpha: 0.35
+  heatmap_sigma: 40
+  heatmap_interval: 5
+privacy:
+  face_blur:
+    enabled: false
+    model_path: models/yolov8n-face.pt
+    conf: 0.4
+    blur_type: gaussian
+    blur_kernel: 25
+counting:
+  roi:
+    enabled: true
+    polygon:
+    - - 6
+      - 383
+    - - 570
+      - 129
+    - - 1267
+      - 194
+    - - 1249
+      - 679
+  line:
+    enabled: true
+    points:
+    - - 339
+      - 213
+    - - 1267
+      - 367
+debug:
+  draw_count_points: true

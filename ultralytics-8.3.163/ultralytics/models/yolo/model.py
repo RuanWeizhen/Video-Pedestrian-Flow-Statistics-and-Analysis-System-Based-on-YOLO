@@ -3,34 +3,20 @@
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
-from ultralytics.data.build import load_inference_source
 from ultralytics.engine.model import Model
-from ultralytics.models import yolo
-from ultralytics.nn.tasks import (
-    ClassificationModel,
-    DetectionModel,
-    OBBModel,
-    PoseModel,
-    SegmentationModel,
-    WorldModel,
-    YOLOEModel,
-    YOLOESegModel,
-)
-from ultralytics.utils import ROOT, YAML
+from ultralytics.nn.tasks import DetectionModel
 
 
 class YOLO(Model):
     """
     YOLO (You Only Look Once) object detection model.
 
-    This class provides a unified interface for YOLO models, automatically switching to specialized model types
-    (YOLOWorld or YOLOE) based on the model filename. It supports various computer vision tasks including object
-    detection, segmentation, classification, pose estimation, and oriented bounding box detection.
+    This class provides a unified interface for detection-only YOLO models.
 
     Attributes:
-        model: The loaded YOLO model instance.
-        task: The task type (detect, segment, classify, pose, obb).
-        overrides: Configuration overrides for the model.
+    model: The loaded YOLO model instance.
+    task: The task type (detect).
+    overrides: Configuration overrides for the model.
 
     Methods:
         __init__: Initialize a YOLO model with automatic type detection.
@@ -51,73 +37,27 @@ class YOLO(Model):
         """
         Initialize a YOLO model.
 
-        This constructor initializes a YOLO model, automatically switching to specialized model types
-        (YOLOWorld or YOLOE) based on the model filename.
-
         Args:
             model (str | Path): Model name or path to model file, i.e. 'yolo11n.pt', 'yolo11n.yaml'.
-            task (str, optional): YOLO task specification, i.e. 'detect', 'segment', 'classify', 'pose', 'obb'.
-                Defaults to auto-detection based on model.
+            task (str, optional): YOLO task specification. Defaults to 'detect'.
             verbose (bool): Display model info on load.
 
         Examples:
-            >>> from ultralytics import YOLO
+            >>> from ultralytics.models.yolo.model import YOLO
             >>> model = YOLO("yolo11n.pt")  # load a pretrained YOLOv11n detection model
-            >>> model = YOLO("yolo11n-seg.pt")  # load a pretrained YOLO11n segmentation model
         """
-        path = Path(model if isinstance(model, (str, Path)) else "")
-        if "-world" in path.stem and path.suffix in {".pt", ".yaml", ".yml"}:  # if YOLOWorld PyTorch model
-            new_instance = YOLOWorld(path, verbose=verbose)
-            self.__class__ = type(new_instance)
-            self.__dict__ = new_instance.__dict__
-        elif "yoloe" in path.stem and path.suffix in {".pt", ".yaml", ".yml"}:  # if YOLOE PyTorch model
-            new_instance = YOLOE(path, task=task, verbose=verbose)
-            self.__class__ = type(new_instance)
-            self.__dict__ = new_instance.__dict__
-        else:
-            # Continue with default YOLO initialization
-            super().__init__(model=model, task=task, verbose=verbose)
-            if hasattr(self.model, "model") and "RTDETR" in self.model.model[-1]._get_name():  # if RTDETR head
-                from ultralytics import RTDETR
-
-                new_instance = RTDETR(self)
-                self.__class__ = type(new_instance)
-                self.__dict__ = new_instance.__dict__
+        super().__init__(model=model, task=task or "detect", verbose=verbose)
 
     @property
     def task_map(self) -> Dict[str, Dict[str, Any]]:
         """Map head to model, trainer, validator, and predictor classes."""
+        from ultralytics.models.yolo.detect.predict import DetectionPredictor
+
         return {
-            "classify": {
-                "model": ClassificationModel,
-                "trainer": yolo.classify.ClassificationTrainer,
-                "validator": yolo.classify.ClassificationValidator,
-                "predictor": yolo.classify.ClassificationPredictor,
-            },
             "detect": {
                 "model": DetectionModel,
-                "trainer": yolo.detect.DetectionTrainer,
-                "validator": yolo.detect.DetectionValidator,
-                "predictor": yolo.detect.DetectionPredictor,
-            },
-            "segment": {
-                "model": SegmentationModel,
-                "trainer": yolo.segment.SegmentationTrainer,
-                "validator": yolo.segment.SegmentationValidator,
-                "predictor": yolo.segment.SegmentationPredictor,
-            },
-            "pose": {
-                "model": PoseModel,
-                "trainer": yolo.pose.PoseTrainer,
-                "validator": yolo.pose.PoseValidator,
-                "predictor": yolo.pose.PosePredictor,
-            },
-            "obb": {
-                "model": OBBModel,
-                "trainer": yolo.obb.OBBTrainer,
-                "validator": yolo.obb.OBBValidator,
-                "predictor": yolo.obb.OBBPredictor,
-            },
+                "predictor": DetectionPredictor,
+            }
         }
 
 

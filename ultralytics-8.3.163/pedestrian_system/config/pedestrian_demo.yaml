@@ -1,4 +1,4 @@
-model_path: "E:/Video Pedestrian Flow Statistics and Analysis System Based on YOLO/ultralytics-8.3.163/runs/train/yolov8m_ema_p3_896_sgd_cloud/weights/best.pt"
+model_path: "runs/train/yolov8m_ema_p3_896_sgd_cloud/weights/best.pt"
 source: videos/test.mp4
 output_dir: outputs/demo_run
 
@@ -11,8 +11,8 @@ performance:
   max_height: 800
 
 detector:
-  model_path: "E:/Video Pedestrian Flow Statistics and Analysis System Based on YOLO/ultralytics-8.3.163/runs/train/yolov8m_ema_p3_896_sgd_cloud/weights/best.pt"
-  imgsz: 512
+  model_path: "runs/train/yolov8m_ema_p3_896_sgd_cloud/weights/best.pt"
+  imgsz: 640
   conf: 0.3
   iou: 0.45
   device: 0
@@ -86,6 +86,13 @@ counting:
       - 761
     - - 3
       - 376
+alert:
+  enabled: false
+  desktop_notify: true
+  total_threshold: 0
+  current_threshold: 0
+  fps_threshold: 0.0
+  cooldown_seconds: 15.0
 static_filter:
   enabled: true
   anchor_point: bottom_center

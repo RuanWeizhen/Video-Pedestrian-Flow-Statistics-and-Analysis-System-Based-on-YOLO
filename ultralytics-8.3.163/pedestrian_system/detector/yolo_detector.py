@@ -9,7 +9,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from ultralytics import YOLO
+from ultralytics.models.yolo.model import YOLO
 
 from utils.common import Detection
 
@@ -54,7 +54,7 @@ class YOLODetector:
     def _normalize_device(self) -> None:
         try:
             import torch
-        except ImportError:
+        except Exception:
             self.device = "cpu"
             self.half = False
             return

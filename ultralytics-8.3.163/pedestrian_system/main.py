@@ -8,24 +8,46 @@ os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["MKL_NUM_THREADS"] = "1"
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
+# Frozen builds need the bundled DLL directories available before importing torch.
+if getattr(sys, "frozen", False):
+    dll_dirs = []
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        dll_dirs.append(Path(meipass))
+        dll_dirs.append(Path(meipass) / "torch" / "lib")
+        dll_dirs.append(Path(meipass) / "torchvision")
+        dll_dirs.append(Path(meipass) / "cv2")
+    for dll_dir in dll_dirs:
+        if dll_dir.exists():
+            try:
+                os.add_dll_directory(str(dll_dir))
+            except Exception:
+                pass
+
 # 强制优先使用本地仓库内的 ultralytics，避免命中系统 Python 的 site-packages。
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-try:
-    import torch
-    torch.set_num_threads(1)
-    torch.set_num_interop_threads(1)
-    torch.backends.mkldnn.enabled = False
-except ImportError:
-    pass
+def _configure_torch_runtime() -> None:
+    try:
+        import torch
+    except Exception:
+        return
+
+    try:
+        torch.set_num_threads(1)
+        torch.set_num_interop_threads(1)
+        torch.backends.mkldnn.enabled = False
+    except Exception:
+        pass
 
 import argparse
 import csv
 import time
 from collections import defaultdict, deque
 import traceback
+import logging
 
 import cv2
 import matplotlib
@@ -35,13 +57,24 @@ import numpy as np
 
 from counting.line_counter import LineCounter
 from counting.zone_counter import ZoneCounterManager
-from detector.yolo_detector import YOLODetector
 from privacy.crypto_utils import CryptoManager
 from privacy.face_blur import FaceBlur
 from tracker.deepsort_wrapper import DeepSortTracker
 from utils.config import load_config
 from utils.filters import filter_tracks_by_roi, StaticTrackFilter
 from utils.io_utils import EventLogger, ensure_dir, save_summary_json
+from utils.paths import resource_path, writable_path
+from utils.torch_runtime import ensure_torch_preloaded
+
+# setup startup log file (works both in source and frozen builds)
+try:
+    log_dir = Path(writable_path("logs"))
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_file = log_dir / "startup.log"
+    logging.basicConfig(level=logging.INFO, filename=str(log_file), filemode="a", format="%(asctime)s %(levelname)s %(message)s")
+except Exception:
+    # fallback to basic config if writable_path not available
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 from utils.visualization import (
     draw_counters_panel,
     draw_line_counter,
@@ -54,7 +87,7 @@ from utils.visualization import (
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=str, default="config/pedestrian_demo.yaml")
+    parser.add_argument("--config", type=str, default=str(resource_path("config/pedestrian_demo.yaml")))
     return parser.parse_args()
 
 
@@ -113,7 +146,9 @@ def save_flow_plot(flow_stats: dict, save_path: Path) -> None:
 
 
 def main():
-    print(">>> program start")
+    ensure_torch_preloaded()
+    _configure_torch_runtime()
+    logging.info(">>> program start")
 
     try:
         args = parse_args()
@@ -170,6 +205,8 @@ def main():
 
         save_video = bool(cfg["output"].get("save_video", True))
         display = bool(cfg["output"].get("display", True))
+
+        from detector.yolo_detector import YOLODetector
 
         video_path = output_dir / cfg["output"].get("video_name", "result.mp4")
         events_csv_path = output_dir / cfg["output"].get("events_csv_name", "events.csv")
@@ -554,13 +591,30 @@ def main():
         print("=" * 70)
 
     except Exception:
-        print("\n❌ PROGRAM CRASHED")
+        logging.exception("❌ PROGRAM CRASHED")
+        # also print to stderr in case user runs from console
+        print("\n❌ PROGRAM CRASHED; see logs/logs/startup.log or logs/startup.log for details")
         traceback.print_exc()
 
 if __name__ == "__main__":
     import sys
-    if "--gui" in sys.argv:
-        from gui import run_app
-        run_app()
-    else:
+    import tempfile
+    try:
+        # ultra-early startup marker for frozen double-click diagnosis
+        marker_dir = Path(tempfile.gettempdir()) / "客流统计系统"
+        marker_dir.mkdir(parents=True, exist_ok=True)
+        (marker_dir / "boot.touch").write_text("boot_entry\n", encoding="utf-8")
+    except Exception:
+        pass
+
+    # 默认双击启动 GUI；若需要命令行模式，传入 --cli
+    if "--cli" in sys.argv:
         main()
+    else:
+        try:
+            ensure_torch_preloaded()
+            from gui import run_app
+            run_app()
+        except Exception:
+            logging.exception("GUI crashed during run_app()")
+            raise

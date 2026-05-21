@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+from datetime import datetime
 import sys
 import time
 import traceback
@@ -15,22 +16,23 @@ from PyQt5.QtGui import QImage
 
 try:
     import torch
-except ImportError:
+except Exception:
     torch = None
 
-REPO_ROOT = Path(r"E:\Video Pedestrian Flow Statistics and Analysis System Based on YOLO\ultralytics-8.3.163")
+REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from counting.line_counter import LineCounter
 from counting.zone_counter import ZoneCounterManager
-from detector.yolo_detector import YOLODetector
 from privacy.face_blur import FaceBlur
 from tracker.deepsort_wrapper import DeepSortTracker
 from utils.config import load_config
 from utils.db_manager import DatabaseManager
 from utils.filters import StaticTrackFilter, filter_tracks_by_roi
+from utils.coordinate_transform import frame_points_to_frame_points
 from utils.io_utils import EventLogger, ensure_dir
+from utils.paths import resource_path, writable_path
 from utils.visualization import (
     draw_counters_panel,
     draw_line_counter,
@@ -46,13 +48,15 @@ class WorkerThread(QThread):
     event_emitted = pyqtSignal(dict)
     log_message = pyqtSignal(str)
     finished = pyqtSignal()
+    frame_position = pyqtSignal(int, int)
+    play_state_changed = pyqtSignal(bool)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.running = False
         self.paused = False
         self.video_path = None
-        self.config_path = Path(__file__).resolve().parents[1] / "config" / "pedestrian_demo.yaml"
+        self.config_path = resource_path("config/pedestrian_demo.yaml")
         self.config_data = None
         self.conf = 0.5
         self.iou = 0.45
@@ -67,6 +71,7 @@ class WorkerThread(QThread):
         self.heatmap_interval = 5
         self.roi_points = []
         self.line_points = []
+        self._seek_frame = -1
         self._detector = None
         self._detector_signature = None
         self._detector_lock = threading.RLock()
@@ -94,9 +99,14 @@ class WorkerThread(QThread):
 
     def pause(self):
         self.paused = True
+        self.play_state_changed.emit(False)
 
     def resume(self):
         self.paused = False
+        self.play_state_changed.emit(True)
+
+    def seek_to_frame(self, frame_number: int):
+        self._seek_frame = max(0, int(frame_number))
 
     def _deep_update(self, base, updates):
         for key, value in updates.items():
@@ -206,6 +216,8 @@ class WorkerThread(QThread):
         detector_cfg = dict(cfg.get("detector", {}))
         signature = self._detector_signature_from_cfg(detector_cfg)
 
+        from detector.yolo_detector import YOLODetector
+
         with self._detector_lock:
             if self._detector is None or self._detector_signature != signature:
                 self._detector = YOLODetector(detector_cfg)
@@ -241,6 +253,14 @@ class WorkerThread(QThread):
 
         cap = None
         event_logger = None
+        trajectory_buffer = []
+        db_manager = None
+        session_id = 0
+        total_frames = 0
+        total_time = 0.0
+        up_count = 0
+        down_count = 0
+        total_count = 0
         try:
             cfg = self._build_runtime_config()
 
@@ -313,7 +333,13 @@ class WorkerThread(QThread):
 
             counting_cfg = cfg.get("counting", {})
             roi_cfg = counting_cfg.get("roi", {})
-            roi_polygon = roi_cfg.get("polygon", []) or []
+            roi_polygon = frame_points_to_frame_points(
+                roi_cfg.get("polygon", []) or [],
+                raw_width,
+                raw_height,
+                proc_width,
+                proc_height,
+            )
             roi_anchor_point = roi_cfg.get("anchor_point", "bottom_center")
             roi_enabled = bool(roi_cfg.get("enabled", False) and len(roi_polygon) >= 3)
             roi_pts_np = np.asarray(roi_polygon, dtype=np.int32) if roi_enabled else None
@@ -329,13 +355,22 @@ class WorkerThread(QThread):
             line_counter = None
             line_cfg = counting_cfg.get("line", {})
             if line_cfg.get("enabled", False) and len(line_cfg.get("points", [])) == 2:
+                line_cfg = dict(line_cfg)
+                line_cfg["points"] = frame_points_to_frame_points(
+                    line_cfg.get("points", []) or [],
+                    raw_width,
+                    raw_height,
+                    proc_width,
+                    proc_height,
+                )
                 line_counter = LineCounter(line_cfg)
 
             zone_manager = ZoneCounterManager(counting_cfg.get("zones", []))
             event_logger = EventLogger(events_csv_path)
 
-            db_manager = DatabaseManager("traffic.db")
+            db_manager = DatabaseManager(writable_path("outputs/traffic.db"))
             db_manager.init_db()
+            session_started_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             session_id = db_manager.start_session(
                 source_name=source_label,
                 source_path=str(source),
@@ -343,7 +378,15 @@ class WorkerThread(QThread):
                 conf=float(detector_cfg.get("conf", self.conf)),
                 iou=float(detector_cfg.get("iou", self.iou)),
                 detector_type=str(detector.summary().get("model_path", "YOLO")),
+                started_at=session_started_at,
             )
+            session_run_id = str(session_id)
+            session_meta = {
+                "session_id": session_id,
+                "run_id": session_run_id,
+                "detect_time": session_started_at,
+                "created_at": session_started_at,
+            }
             last_db_insert_time = time.time()
 
             visualization_cfg = cfg.get("visualization", {})
@@ -357,10 +400,12 @@ class WorkerThread(QThread):
 
             heatmap_accum = np.zeros((proc_height, proc_width), dtype=np.float32)
             heatmap_overlay_cache = None
+            _display_rgba = np.zeros((proc_height, proc_width, 3), dtype=np.uint8)
 
             qimage_bgr_format = QImage.Format_BGR888 if hasattr(QImage, "Format_BGR888") else None
 
             track_history = defaultdict(lambda: deque(maxlen=trail_length))
+            trajectory_buffer = []
             flow_stats = defaultdict(lambda: {"up": 0, "down": 0})
 
             last_frame_emit = 0.0
@@ -381,10 +426,22 @@ class WorkerThread(QThread):
 
             self.log_message.emit(f"开始处理视频: {source}")
 
+            _torch_inf = torch.inference_mode() if torch is not None else None
+
             while self.running:
                 if self.paused:
                     self.msleep(40)
                     continue
+
+                if self._seek_frame >= 0:
+                    seek_target = self._seek_frame
+                    self._seek_frame = -1
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, seek_target)
+                    frame_idx = seek_target
+                    track_history.clear()
+                    heatmap_accum.fill(0)
+                    heatmap_overlay_cache = None
+                    self.log_message.emit(f"跳转到帧 {seek_target}")
 
                 ok, frame = cap.read()
                 if not ok:
@@ -399,8 +456,8 @@ class WorkerThread(QThread):
                 detector.conf = float(self.conf)
                 detector.iou = float(self.iou)
 
-                if torch is not None:
-                    with torch.inference_mode():
+                if _torch_inf is not None:
+                    with _torch_inf:
                         detections = detector.detect(frame)
                 else:
                     detections = detector.detect(frame)
@@ -450,8 +507,17 @@ class WorkerThread(QThread):
                     line_events = line_counter.update(counting_tracks, frame_idx)
                     for event in line_events:
                         event_logger.add_event(event)
-                        db_manager.insert_event(event, session_id=session_id, source_name=source_label)
-                        self.event_emitted.emit(dict(event))
+                        event_payload = dict(event)
+                        event_payload.update(session_meta)
+                        db_manager.insert_event(
+                            event_payload,
+                            session_id=session_id,
+                            source_name=source_label,
+                            run_id=session_run_id,
+                            detect_time=session_started_at,
+                            created_at=session_started_at,
+                        )
+                        self.event_emitted.emit(event_payload)
                         direction = event.get("direction") or event.get("label") or event.get("value")
                         minute_idx = int((frame_idx / fps) // 60)
                         if direction == "up":
@@ -462,8 +528,17 @@ class WorkerThread(QThread):
                 zone_events = zone_manager.update(counting_tracks, frame_idx)
                 for event in zone_events:
                     event_logger.add_event(event)
-                    db_manager.insert_event(event, session_id=session_id, source_name=source_label)
-                    self.event_emitted.emit(dict(event))
+                    event_payload = dict(event)
+                    event_payload.update(session_meta)
+                    db_manager.insert_event(
+                        event_payload,
+                        session_id=session_id,
+                        source_name=source_label,
+                        run_id=session_run_id,
+                        detect_time=session_started_at,
+                        created_at=session_started_at,
+                    )
+                    self.event_emitted.emit(event_payload)
                 current_minute = int((frame_idx / fps) // 60)
                 up_now = int(flow_stats[current_minute]["up"])
                 down_now = int(flow_stats[current_minute]["down"])
@@ -495,7 +570,8 @@ class WorkerThread(QThread):
                 now_pc = time.perf_counter()
                 do_render = ui_frame_interval <= 0.0 or (now_pc - last_frame_emit) >= ui_frame_interval
                 if do_render:
-                    annotated = frame  # 直接原地绘制，避免整帧 copy
+                    np.copyto(_display_rgba, frame)
+                    annotated = _display_rgba
 
                     if self.show_roi and roi_pts_np is not None and len(roi_pts_np) >= 3:
                         cv2.polylines(annotated, [roi_pts_np], True, (255, 0, 255), 2)
@@ -578,15 +654,14 @@ class WorkerThread(QThread):
                         except Exception as exc:
                             self.log_message.emit(f"热力图叠加失败: {exc}")
 
-                    # 优先走 BGR888，避免每帧 BGR->RGB 颜色转换
                     h, w = annotated.shape[:2]
-                    bytes_per_line = int(annotated.strides[0])
+                    bpl = w * 3
                     if qimage_bgr_format is not None:
-                        q_img = QImage(annotated.data, w, h, bytes_per_line, qimage_bgr_format).copy()
+                        q_img = QImage(annotated.data, w, h, bpl, qimage_bgr_format).copy()
                     else:
-                        rgb_image = cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB)
-                        bytes_per_line = int(rgb_image.strides[0])
-                        q_img = QImage(rgb_image.data, w, h, bytes_per_line, QImage.Format_RGB888).copy()
+                        rgb = cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB)
+                        bpl = w * 3
+                        q_img = QImage(rgb.data, w, h, bpl, QImage.Format_RGB888).copy()
 
                     self.new_frame.emit(q_img)
                     last_frame_emit = time.perf_counter()
@@ -597,6 +672,35 @@ class WorkerThread(QThread):
                         if tid not in visible_ids:
                             track_history.pop(tid, None)
 
+                if tracks_for_draw:
+                    frame_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    for tr in tracks_for_draw:
+                        px, py = tr.count_point("bottom_center")
+                        src_px = int(round(px / resize_scale)) if resize_scale > 1e-9 else int(px)
+                        src_py = int(round(py / resize_scale)) if resize_scale > 1e-9 else int(py)
+                        src_x1 = int(round(float(tr.x1) / resize_scale)) if resize_scale > 1e-9 else int(round(float(tr.x1)))
+                        src_y1 = int(round(float(tr.y1) / resize_scale)) if resize_scale > 1e-9 else int(round(float(tr.y1)))
+                        src_x2 = int(round(float(tr.x2) / resize_scale)) if resize_scale > 1e-9 else int(round(float(tr.x2)))
+                        src_y2 = int(round(float(tr.y2) / resize_scale)) if resize_scale > 1e-9 else int(round(float(tr.y2)))
+                        trajectory_buffer.append(
+                            {
+                                "session_id": session_id,
+                                "run_id": session_run_id,
+                                "source_name": source_label,
+                                "detect_time": session_started_at,
+                                "timestamp": frame_timestamp,
+                                "created_at": frame_timestamp,
+                                "frame_idx": frame_idx,
+                                "track_id": int(tr.track_id),
+                                "x1": float(src_x1),
+                                "y1": float(src_y1),
+                                "x2": float(src_x2),
+                                "y2": float(src_y2),
+                                "cx": float(src_px),
+                                "cy": float(src_py),
+                            }
+                        )
+
                 elapsed = time.perf_counter() - loop_t0
                 total_frames += 1
                 total_time += elapsed
@@ -605,6 +709,8 @@ class WorkerThread(QThread):
                 
                 total_count = up_count + down_count
                 stats = {
+                    "session_id": session_id,
+                    "run_id": session_run_id,
                     "up": up_count,
                     "down": down_count,
                     "total": total_count,
@@ -621,11 +727,27 @@ class WorkerThread(QThread):
                     self.stats_updated.emit(stats)
                     last_stats_emit = now_pc
 
+                self.frame_position.emit(frame_idx + 1, total_frames_hint)
+
                 # 每1秒写入一次数据库
                 current_time = time.time()
                 if current_time - last_db_insert_time >= 1.0:
                     try:
-                        db_manager.insert_data(up_count, down_count, total_count, session_id=session_id, source_name=source_label)
+                        db_manager.insert_data(
+                            up_count,
+                            down_count,
+                            total_count,
+                            session_id=session_id,
+                            source_name=source_label,
+                            run_id=session_run_id,
+                            detect_time=session_started_at,
+                            fps=fps_now,
+                            avg_fps=stats["avg_fps"],
+                            frame_idx=frame_idx,
+                        )
+                        if trajectory_buffer:
+                            db_manager.insert_trajectory_points(trajectory_buffer)
+                            trajectory_buffer.clear()
                         # 每存几十秒可以顺手清一次旧数据防膨胀
                         if int(current_time) % 60 == 0:
                             db_manager.delete_old_data(limit=5000)
@@ -656,20 +778,27 @@ class WorkerThread(QThread):
                 except Exception as exc:
                     self.log_message.emit(f"事件写盘失败: {exc}")
 
+            if trajectory_buffer:
+                try:
+                    db_manager.insert_trajectory_points(trajectory_buffer)
+                except Exception as exc:
+                    self.log_message.emit(f"轨迹写盘失败: {exc}")
+
             try:
-                db_manager.finalize_session(
-                    session_id,
-                    avg_fps=(total_frames / total_time) if total_time > 0 else 0.0,
-                    up_count=up_count,
-                    down_count=down_count,
-                    total_count=total_count,
-                )
+                if db_manager is not None:
+                    db_manager.finalize_session(
+                        session_id,
+                        avg_fps=(total_frames / total_time) if total_time > 0 else 0.0,
+                        up_count=up_count,
+                        down_count=down_count,
+                        total_count=total_count,
+                    )
             except Exception:
                 pass
 
             try:
-                # 结束前关闭数据库连接
-                db_manager.close()
+                if db_manager is not None:
+                    db_manager.close()
             except Exception:
                 pass
 

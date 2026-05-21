@@ -26,7 +26,7 @@ class FaceBlur:
             return
         # Try to use Ultralytics YOLO face model if available and path exists.
         try:
-            from ultralytics import YOLO
+            from ultralytics.models.yolo.model import YOLO
 
             if Path(self.model_path).exists():
                 try:
