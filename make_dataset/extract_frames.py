@@ -6,7 +6,7 @@ from tqdm import tqdm  # 导入 tqdm 库，用于显示进度条（如果没有�
 # 输入视频文件夹路径
 video_folder = r"E:\Video Pedestrian Flow Statistics and Analysis System Based on YOLO\make_dataset\videos"
 # 输出图片文件夹路径
-output_folder = r"E:\Video Pedestrian Flow Statistics and Analysis System Based on YOLO\make_dataset\images"
+output_folder = r"E:\Video Pedestrian Flow Statistics and Analysis System Based on YOLO\make_dataset\images1"
 # 每隔多少帧提取一张图片（例如 30 表示每 30 帧保存一帧）
 frame_interval = 30
 # ===================================================================

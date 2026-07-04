@@ -33,7 +33,7 @@ except Exception:
     import logging
     try:
         import tempfile
-        temp_dir = Path(tempfile.gettempdir()) / "客流统计系统" / "logs"
+        temp_dir = Path(tempfile.gettempdir()) / "行人检测系统" / "logs"
         temp_dir.mkdir(parents=True, exist_ok=True)
         temp_log = temp_dir / "startup.log"
         logging.basicConfig(level=logging.INFO, filename=str(temp_log), filemode="a", format="%(asctime)s %(levelname)s %(message)s")

@@ -111,7 +111,7 @@ output:
 visualization:
   trail_length: 30
   show_confidence: true
-  box_thickness: 2
+  box_thickness: 1
   draw_roi: true
   show_heatmap: true
   heatmap_alpha: 0.35

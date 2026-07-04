@@ -283,7 +283,7 @@ class DatabaseManager:
 
     def insert_data(self, up, down, total, session_id: int | None = None, source_name: str = "", run_id: str | None = None, detect_time: str | None = None, fps: float | None = None, avg_fps: float | None = None, created_at: str | None = None, frame_idx: int | None = None):
         """
-        插入一条包含当前时间戳的实时客流记录
+        插入一条包含当前时间戳的实时行人记录
         """
         timestamp = created_at or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         detect_time = detect_time or timestamp
@@ -715,7 +715,7 @@ if __name__ == "__main__":
     # 1. 实例化管理类（将自动创建 outputs/traffic.db 并初始化建表）
     db = DatabaseManager("outputs/test_traffic.db")
     
-    # 2. 模拟由于 YOLO 检测带来的客流发生变化并定时触发写入
+    # 2. 模拟由于 YOLO 检测带来的行人量发生变化并定时触发写入
     import time
     print("开始模拟插入数据...")
     for i in range(3):

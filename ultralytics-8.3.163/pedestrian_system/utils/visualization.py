@@ -7,7 +7,7 @@ import numpy as np
 from pathlib import Path
 
 
-def draw_tracks(frame, tracks, show_conf: bool = True, box_thickness: int = 2):
+def draw_tracks(frame, tracks, show_conf: bool = True, box_thickness: int = 1):
     for tr in tracks:
         x1, y1, x2, y2 = map(int, [tr.x1, tr.y1, tr.x2, tr.y2])
         cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), box_thickness)
@@ -21,9 +21,9 @@ def draw_tracks(frame, tracks, show_conf: bool = True, box_thickness: int = 2):
             label,
             (x1, max(20, y1 - 8)),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.6,
+            0.5,
             (0, 255, 0),
-            2,
+            1,
             cv2.LINE_AA,
         )
     return frame
@@ -37,14 +37,14 @@ def draw_track_history(frame, track_history):
         if pts.ndim != 2 or pts.shape[0] < 2 or pts.shape[1] != 2:
             continue
         pts = pts.reshape((-1, 1, 2))
-        cv2.polylines(frame, [pts], isClosed=False, color=(255, 180, 0), thickness=2, lineType=cv2.LINE_AA)
+        cv2.polylines(frame, [pts], isClosed=False, color=(255, 180, 0), thickness=1, lineType=cv2.LINE_AA)
     return frame
 
 
 def draw_line_counter(frame, line_counter):
     p1 = tuple(map(int, line_counter.p1))
     p2 = tuple(map(int, line_counter.p2))
-    cv2.line(frame, p1, p2, (0, 0, 255), 3, cv2.LINE_AA)
+    cv2.line(frame, p1, p2, (0, 0, 255), 1, cv2.LINE_AA)
 
     text = f"{line_counter.name}: {line_counter.counts}"
     x = min(p1[0], p2[0])
@@ -54,9 +54,9 @@ def draw_line_counter(frame, line_counter):
         text,
         (x, y),
         cv2.FONT_HERSHEY_SIMPLEX,
-        0.7,
+        0.5,
         (0, 0, 255),
-        2,
+        1,
         cv2.LINE_AA,
     )
     return frame
@@ -66,7 +66,7 @@ def draw_zone_counters(frame, zone_manager):
     for zone in zone_manager.zones:
         pts = [tuple(map(int, p)) for p in zone.polygon]
         for i in range(len(pts)):
-            cv2.line(frame, pts[i], pts[(i + 1) % len(pts)], (255, 0, 255), 2, cv2.LINE_AA)
+            cv2.line(frame, pts[i], pts[(i + 1) % len(pts)], (255, 0, 255), 1, cv2.LINE_AA)
 
         anchor = pts[0]
         text = f"{zone.name} | in:{zone.enter_count} out:{zone.leave_count} now:{zone.current_count()}"
@@ -75,9 +75,9 @@ def draw_zone_counters(frame, zone_manager):
             text,
             (anchor[0], max(25, anchor[1] - 10)),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.6,
+            0.5,
             (255, 0, 255),
-            2,
+            1,
             cv2.LINE_AA,
         )
     return frame
@@ -120,9 +120,9 @@ def draw_counters_panel(frame, line_counter, zone_manager):
             text,
             (x, y + idx * line_height),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.65,
+            0.5,
             (255, 255, 255),
-            2,
+            1,
             cv2.LINE_AA,
         )
     return frame

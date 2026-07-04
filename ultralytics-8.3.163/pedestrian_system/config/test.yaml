@@ -7,13 +7,13 @@ performance:
   max_height: 800
 detector:
   model_path: E:/Video Pedestrian Flow Statistics and Analysis System Based on YOLO/ultralytics-8.3.163/runs/train/yolov8m_ema_p3_896_sgd_cloud/weights/best.pt
-  conf: 0.07
+  conf: 0.12000000000000001
   iou: 0.5
 visualization:
   show_trail: true
   draw_roi: true
   draw_line: true
-  show_heatmap: false
+  show_heatmap: true
   heatmap_alpha: 0.35
   heatmap_sigma: 40
   heatmap_interval: 5
@@ -28,20 +28,31 @@ counting:
   roi:
     enabled: true
     polygon:
-    - - 6
-      - 383
-    - - 570
-      - 129
-    - - 1267
-      - 194
-    - - 1249
-      - 679
+    - - 1057
+      - 298
+    - - 8
+      - 772
+    - - 2406
+      - 1502
+    - - 2556
+      - 505
   line:
     enabled: true
     points:
-    - - 339
-      - 213
-    - - 1267
-      - 367
+    - - 609
+      - 497
+    - - 2499
+      - 910
 debug:
   draw_count_points: true
+alert:
+  enabled: false
+  desktop_notify: true
+  total_threshold: 0
+  current_threshold: 0
+  fps_threshold: 0.0
+  cooldown_seconds: 15.0
+annotation_frame_size:
+  width: 2560
+  height: 1600
+  coord_space: source

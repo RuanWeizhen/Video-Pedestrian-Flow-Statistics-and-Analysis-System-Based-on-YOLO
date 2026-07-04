@@ -82,7 +82,7 @@ from utils.model_registry import (
     update_model_evaluation,
 )
 from utils.coordinate_transform import frame_points_to_frame_points
-from utils.paths import resource_path, writable_path
+from utils.paths import external_resource_path, resource_path, writable_path
 from utils.torch_runtime import ensure_torch_preloaded
 
 
@@ -322,7 +322,7 @@ class MainWindow(QMainWindow):
     def __init__(self, current_user: dict | None = None):
         super().__init__()
         self.current_user = current_user or {"username": "未登录", "role": "管理员"}
-        self.setWindowTitle("视频行人客流量统计与分析系统")
+        self.setWindowTitle("视频行人检测与分析系统")
         self.resize(1200, 800)
 
         self.current_config_path = None
@@ -358,6 +358,7 @@ class MainWindow(QMainWindow):
         self._active_alert_keys = set()
         self._alert_last_emit_at = {}
         self._last_realtime_stats = None
+        self._natural_video_end = False
 
         self.worker = WorkerThread()
         self.worker.set_config(self.current_config)
@@ -402,6 +403,13 @@ class MainWindow(QMainWindow):
         self.detect_metric_down = DashboardMetricCard("Down", "0", "下行人数")
         self.detect_metric_current = DashboardMetricCard("当前人数", "0", "当前画面")
         self.detect_metric_fps = DashboardMetricCard("FPS", "0.0", "实时性能")
+
+        self.perf_metric_fps = DashboardMetricCard("平均 FPS", "0.0", "推理吞吐")
+        self.perf_metric_prep = DashboardMetricCard("预处理", "0.0 ms", "resize+归一化")
+        self.perf_metric_inf = DashboardMetricCard("推理耗时", "0.0 ms", "模型前向")
+        self.perf_metric_post = DashboardMetricCard("后处理", "0.0 ms", "NMS+跟踪")
+        self.perf_metric_gpu = DashboardMetricCard("GPU", "0%", "利用率")
+        self.perf_metric_cpu = DashboardMetricCard("CPU", "0%", "占用率")
 
         self.sidebar_buttons: dict[str, SidebarButton] = {}
         self.page_titles: dict[str, tuple[str, str]] = {
@@ -450,7 +458,7 @@ class MainWindow(QMainWindow):
         brand_layout = QVBoxLayout(brand)
         brand_layout.setContentsMargins(16, 20, 16, 20)
         brand_layout.setSpacing(6)
-        brand_title = QLabel("客流统计系统")
+        brand_title = QLabel("行人检测系统")
         brand_title.setObjectName("SidebarBrandTitle")
         brand_subtitle = QLabel("Dashboard UI")
         brand_subtitle.setObjectName("SidebarBrandSubtitle")
@@ -611,6 +619,31 @@ class MainWindow(QMainWindow):
             self.detect_metric_fps,
         ])
         layout.addLayout(metrics_row)
+
+        self.perf_metrics_widget = QWidget()
+        self.perf_metrics_widget.setLayout(build_metric_row([
+            self.perf_metric_fps,
+            self.perf_metric_prep,
+            self.perf_metric_inf,
+            self.perf_metric_post,
+            self.perf_metric_gpu,
+            self.perf_metric_cpu,
+        ]))
+        layout.addWidget(self.perf_metrics_widget)
+        self.perf_metrics_widget.setVisible(False)
+
+        self._perf_report_btn = QPushButton("📊 导出性能基准报告")
+        self._perf_report_btn.setCursor(Qt.PointingHandCursor)
+        self._perf_report_btn.setStyleSheet(
+            "QPushButton {"
+            "  background: #2F80ED; color: #ffffff; font-size: 13px; font-weight: 600;"
+            "  border: none; border-radius: 8px; padding: 8px 18px;"
+            "}"
+            "QPushButton:hover { background: #2563EB; }"
+        )
+        self._perf_report_btn.clicked.connect(self._export_perf_report)
+        self._perf_report_btn.setVisible(False)
+        layout.addWidget(self._perf_report_btn, 0, Qt.AlignRight)
 
         splitter = QSplitter(Qt.Horizontal)
 
@@ -1260,7 +1293,7 @@ class MainWindow(QMainWindow):
         name_row.addStretch()
         info_col.addLayout(name_row)
 
-        self.profile_banner_desc = QLabel("系统管理员账号，可管理客流检测、数据统计与系统配置。")
+        self.profile_banner_desc = QLabel("系统管理员账号，可管理行人检测、数据统计与系统配置。")
         self.profile_banner_desc.setStyleSheet("color: #6B7280; font-size: 13px;")
         info_col.addWidget(self.profile_banner_desc)
 
@@ -1774,7 +1807,7 @@ class MainWindow(QMainWindow):
 
         role = (self.current_user or {}).get("role", "管理员")
         username = (self.current_user or {}).get("username", "未知用户")
-        self.setWindowTitle(f"视频行人客流量统计与分析系统 - {username}（{role}）")
+        self.setWindowTitle(f"视频行人检测与分析系统 - {username}（{role}）")
         self.statusBar().showMessage(f"当前用户：{username} | 身份：{role}")
         self._refresh_profile_page()
         self._refresh_management_page()
@@ -2077,7 +2110,7 @@ class MainWindow(QMainWindow):
             icon: QIcon = self.style().standardIcon(QStyle.SP_MessageBoxInformation)
             self.setWindowIcon(icon)
             tray_icon = QSystemTrayIcon(icon, self)
-            tray_icon.setToolTip("视频行人客流量统计与分析系统")
+            tray_icon.setToolTip("视频行人检测与分析系统")
             tray_icon.show()
             self.tray_icon = tray_icon
         except Exception:
@@ -2530,7 +2563,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "未选择模型", "请先在模型版本表中选中一个模型。")
             return
 
-        default_dataset = str(resource_path("datasets/pedestrian_all/data.yaml"))
+        default_dataset = str(external_resource_path("datasets/pedestrian_all/data.yaml"))
         dataset_path, _ = QFileDialog.getOpenFileName(
             self,
             "选择评估数据集",
@@ -3090,8 +3123,8 @@ class MainWindow(QMainWindow):
 
         _safe_text("profile_banner_name", display_name)
         _safe_text("profile_banner_desc",
-                   "系统管理员账号，可管理客流检测、数据统计与系统配置。" if display_role == "管理员"
-                   else "员工账号，可查看客流检测与数据统计信息。")
+                   "系统管理员账号，可管理行人检测、数据统计与系统配置。" if display_role == "管理员"
+                   else "员工账号，可查看行人检测与数据统计信息。")
 
         if display_role == "管理员":
             _safe_badge("profile_banner_role_badge", display_role, "#DBEAFE", "#1E40AF")
@@ -3825,6 +3858,8 @@ class MainWindow(QMainWindow):
             self.log_panel.append_log("请先选择视频源")
             return
 
+        self._natural_video_end = False
+
         runtime_params = self.annotation_panel.get_params()
         detector_cfg = self.current_config.setdefault("detector", {})
         detector_cfg["conf"] = float(runtime_params.get("conf", detector_cfg.get("conf", 0.5)))
@@ -3898,6 +3933,7 @@ class MainWindow(QMainWindow):
             self.video_player.show()
 
     def stop_processing(self):
+        self._natural_video_end = False
         self.worker.stop()
         self._stale_timer.stop()
         self.log_panel.append_log("正在停止")
@@ -3926,6 +3962,12 @@ class MainWindow(QMainWindow):
         self.worker.finished.connect(self.on_process_finished)
         self.worker.frame_position.connect(self._on_frame_position)
         self.worker.play_state_changed.connect(self.video_player.set_playing)
+        self.worker.perf_sample.connect(self._on_perf_sample)
+        self.worker.video_finished.connect(self.on_video_finished)
+
+    def on_video_finished(self):
+        self._natural_video_end = True
+        self.log_panel.append_log("视频播放完毕，画面停留最后一帧")
 
     def _on_frame_position(self, current: int, total: int):
         self._last_frame_position = current
@@ -3943,6 +3985,83 @@ class MainWindow(QMainWindow):
         target = max(0, self._last_frame_position - delta)
         self._on_seek_requested(target)
 
+    def _on_perf_sample(self, data: dict):
+        if hasattr(self, "perf_metrics_widget"):
+            self.perf_metrics_widget.setVisible(True)
+        if hasattr(self, "_perf_report_btn"):
+            self._perf_report_btn.setVisible(True)
+        try:
+            self.perf_metric_fps.set_value(f"{data.get('fps', 0):.1f}", f"{data.get('frames', 0)} 帧")
+        except Exception:
+            pass
+        try:
+            self.perf_metric_prep.set_value(f"{data.get('preprocess_ms', 0):.1f} ms", "resize+归一化")
+        except Exception:
+            pass
+        try:
+            self.perf_metric_inf.set_value(f"{data.get('inference_ms', 0):.1f} ms", "模型前向")
+        except Exception:
+            pass
+        try:
+            self.perf_metric_post.set_value(f"{data.get('postprocess_ms', 0):.1f} ms", "NMS+跟踪")
+        except Exception:
+            pass
+        try:
+            self.perf_metric_gpu.set_value(f"{data.get('gpu_util_pct', 0):.0f}%", "GPU 利用率")
+        except Exception:
+            pass
+        try:
+            self.perf_metric_cpu.set_value(f"{data.get('cpu_util_pct', 0):.0f}%", "CPU 占用率")
+        except Exception:
+            pass
+
+    def _export_perf_report(self):
+        from pathlib import Path
+        from utils.paths import writable_path
+        from utils.perf_profiler import PerformanceProfiler
+        from utils.system_optimizer import get_system_info_report
+        import json
+        from datetime import datetime
+
+        out_dir = writable_path("outputs/benchmarks")
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = out_dir / f"perf_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+
+        try:
+            sys_info = get_system_info_report()
+        except Exception:
+            sys_info = {}
+
+        snapshots = {}
+        for attr in ("perf_metric_fps", "perf_metric_prep", "perf_metric_inf",
+                      "perf_metric_post", "perf_metric_gpu", "perf_metric_cpu"):
+            card = getattr(self, attr, None)
+            if card is not None:
+                try:
+                    snapshots[attr] = card.value_label.text()
+                except Exception:
+                    snapshots[attr] = "N/A"
+
+        report = {
+            "title": "行人检测性能基准报告",
+            "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "system_info": sys_info,
+            "current_snapshot": snapshots,
+        }
+        with out_path.open("w", encoding="utf-8") as f:
+            json.dump(report, f, ensure_ascii=False, indent=2)
+
+        QMessageBox.information(
+            self, "导出成功",
+            f"性能基准报告已保存至:\n{out_path}\n\n"
+            f"FPS: {snapshots.get('perf_metric_fps', 'N/A')}\n"
+            f"预处理: {snapshots.get('perf_metric_prep', 'N/A')}\n"
+            f"推理: {snapshots.get('perf_metric_inf', 'N/A')}\n"
+            f"后处理: {snapshots.get('perf_metric_post', 'N/A')}\n"
+            f"GPU: {snapshots.get('perf_metric_gpu', 'N/A')}\n"
+            f"CPU: {snapshots.get('perf_metric_cpu', 'N/A')}\n"
+        )
+
     def on_process_finished(self):
         self.control_panel.btn_start.setEnabled(True)
         self.control_panel.btn_stop.setEnabled(False)
@@ -3954,10 +4073,15 @@ class MainWindow(QMainWindow):
         self._active_alert_keys = set()
         self._update_alert_status_label()
         self.video_player.set_playing(False)
-        self._last_frame_position = 0
-        if hasattr(self, "video_placeholder"):
-            self.video_placeholder.show()
-            self.video_player.hide()
+        if not self._natural_video_end:
+            self._last_frame_position = 0
+            if hasattr(self, "video_placeholder"):
+                self.video_placeholder.show()
+                self.video_player.hide()
+        if hasattr(self, "perf_metrics_widget"):
+            self.perf_metrics_widget.setVisible(False)
+        if hasattr(self, "_perf_report_btn"):
+            self._perf_report_btn.setVisible(False)
         try:
             self.history_db.close()
         except Exception:
@@ -4365,7 +4489,7 @@ class MainWindow(QMainWindow):
                 "max_height": 800,
             },
             "detector": {
-                "model_path": str(resource_path("runs/train/yolov8m_ema_p3_896_sgd_cloud/weights/best.pt")),
+                "model_path": str(external_resource_path("runs/train/yolov8m_ema_p3_896_sgd_cloud/weights/best.pt")),
                 "conf": 0.5,
                 "iou": 0.45,
             },

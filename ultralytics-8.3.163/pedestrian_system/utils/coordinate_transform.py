@@ -16,6 +16,14 @@ def _coerce_size(width, height) -> tuple[int, int]:
 
 
 def get_display_transform(frame_w, frame_h, display_w, display_h) -> dict:
+    """计算从帧坐标系到显示坐标系的变换参数。
+    
+    使用等比例缩放（letterbox）：保持宽高比，短边居中放置。
+    返回字典包含：
+      - scale: 缩放比例因子
+      - scaled_w / scaled_h: 缩放后尺寸
+      - offset_x / offset_y: 居中偏移量（黑边宽度）
+    """
     frame_w, frame_h = _coerce_size(frame_w, frame_h)
     display_w, display_h = _coerce_size(display_w, display_h)
 
@@ -43,6 +51,7 @@ def get_display_transform(frame_w, frame_h, display_w, display_h) -> dict:
 
 
 def frame_to_display_point(x, y, frame_w, frame_h, display_w, display_h):
+    """将帧坐标系的点映射到显示坐标系"""
     frame_w, frame_h = _coerce_size(frame_w, frame_h)
     display_w, display_h = _coerce_size(display_w, display_h)
     if frame_w <= 0 or frame_h <= 0 or display_w <= 0 or display_h <= 0:
@@ -55,6 +64,7 @@ def frame_to_display_point(x, y, frame_w, frame_h, display_w, display_h):
 
 
 def display_to_frame_point(display_x, display_y, frame_w, frame_h, display_w, display_h):
+    """将显示坐标系的点映射回帧坐标系（逆变换）"""
     frame_w, frame_h = _coerce_size(frame_w, frame_h)
     display_w, display_h = _coerce_size(display_w, display_h)
     if frame_w <= 0 or frame_h <= 0 or display_w <= 0 or display_h <= 0:
@@ -74,6 +84,7 @@ def display_to_frame_point(display_x, display_y, frame_w, frame_h, display_w, di
 
 
 def frame_points_to_display_points(points: Iterable[Sequence[float]], frame_w, frame_h, display_w, display_h):
+    """批量帧坐标 → 显示坐标"""
     converted = []
     for point in points or []:
         if point is None:
@@ -89,6 +100,7 @@ def frame_points_to_display_points(points: Iterable[Sequence[float]], frame_w, f
 
 
 def display_points_to_frame_points(points: Iterable[Sequence[float]], frame_w, frame_h, display_w, display_h):
+    """批量显示坐标 → 帧坐标"""
     converted = []
     for point in points or []:
         if point is None:
@@ -104,6 +116,11 @@ def display_points_to_frame_points(points: Iterable[Sequence[float]], frame_w, f
 
 
 def frame_points_to_frame_points(points: Iterable[Sequence[float]], source_w, source_h, target_w, target_h):
+    """将点从一个帧尺寸线性映射到另一个帧尺寸。
+    
+    用于将人工标注的计数线/ROI 多边形从原始视频尺寸映射到处理分辨率。
+    原理：X 坐标按宽度比例缩放，Y 坐标按高度比例缩放（非等比例）。
+    """
     source_w, source_h = _coerce_size(source_w, source_h)
     target_w, target_h = _coerce_size(target_w, target_h)
     if source_w <= 0 or source_h <= 0 or target_w <= 0 or target_h <= 0:

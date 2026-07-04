@@ -63,7 +63,7 @@ from tracker.deepsort_wrapper import DeepSortTracker
 from utils.config import load_config
 from utils.filters import filter_tracks_by_roi, StaticTrackFilter
 from utils.io_utils import EventLogger, ensure_dir, save_summary_json
-from utils.paths import resource_path, writable_path
+from utils.paths import external_resource_path, resource_path, writable_path
 from utils.torch_runtime import ensure_torch_preloaded
 
 # setup startup log file (works both in source and frozen builds)
@@ -87,7 +87,7 @@ from utils.visualization import (
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=str, default=str(resource_path("config/pedestrian_demo.yaml")))
+    parser.add_argument("--config", type=str, default=str(external_resource_path("config/pedestrian_demo.yaml")))
     return parser.parse_args()
 
 
@@ -250,7 +250,7 @@ def main():
         visualization_cfg = cfg.get("visualization", {})
         trail_length = int(visualization_cfg.get("trail_length", 30))
         show_confidence = bool(visualization_cfg.get("show_confidence", True))
-        box_thickness = int(visualization_cfg.get("box_thickness", 2))
+        box_thickness = int(visualization_cfg.get("box_thickness", 1))
         draw_roi = bool(visualization_cfg.get("draw_roi", True))
 
         debug_cfg = cfg.get("debug", {})
@@ -271,7 +271,7 @@ def main():
         heatmap_interval = max(1, int(visualization_cfg.get("heatmap_interval", 5)))
         heatmap_overlay_cache = None
 
-        # 新增：每分钟客流统计
+        # 新增：每分钟行人统计
         flow_stats = defaultdict(lambda: {"up": 0, "down": 0})
 
         frame_idx = 0
@@ -601,7 +601,7 @@ if __name__ == "__main__":
     import tempfile
     try:
         # ultra-early startup marker for frozen double-click diagnosis
-        marker_dir = Path(tempfile.gettempdir()) / "客流统计系统"
+        marker_dir = Path(tempfile.gettempdir()) / "行人检测系统"
         marker_dir.mkdir(parents=True, exist_ok=True)
         (marker_dir / "boot.touch").write_text("boot_entry\n", encoding="utf-8")
     except Exception:

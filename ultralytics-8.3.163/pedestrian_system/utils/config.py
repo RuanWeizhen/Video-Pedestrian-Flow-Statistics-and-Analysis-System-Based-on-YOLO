@@ -5,7 +5,7 @@ from typing import Dict
 
 import yaml
 
-from .paths import resource_path, writable_path
+from .paths import external_resource_path, writable_path
 
 
 def _resolve_existing_path(value, base_dir: Path):
@@ -22,11 +22,11 @@ def _resolve_existing_path(value, base_dir: Path):
     if path.is_absolute():
         return str(path)
 
-    for candidate in (base_dir / path, resource_path(path)):
+    for candidate in (base_dir / path, external_resource_path(path)):
         if candidate.exists():
             return str(candidate)
 
-    return str(resource_path(path))
+    return str(external_resource_path(path))
 
 
 def _resolve_writable_path(value):
@@ -45,7 +45,7 @@ def _resolve_writable_path(value):
 
 
 def load_config(config_path: str) -> Dict:
-    path = resource_path(config_path)
+    path = external_resource_path(config_path)
     if not path.exists():
         raise FileNotFoundError(f"Config file not found: {config_path}")
 

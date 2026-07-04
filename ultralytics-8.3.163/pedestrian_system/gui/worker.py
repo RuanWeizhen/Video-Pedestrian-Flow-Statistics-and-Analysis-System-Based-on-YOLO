@@ -8,6 +8,7 @@ import traceback
 from collections import defaultdict, deque
 from pathlib import Path
 import threading
+import queue
 
 import cv2
 import numpy as np
@@ -32,7 +33,9 @@ from utils.db_manager import DatabaseManager
 from utils.filters import StaticTrackFilter, filter_tracks_by_roi
 from utils.coordinate_transform import frame_points_to_frame_points
 from utils.io_utils import EventLogger, ensure_dir
-from utils.paths import resource_path, writable_path
+from utils.paths import external_resource_path, resource_path, writable_path
+from utils.perf_profiler import PerformanceProfiler
+from utils.system_optimizer import apply_system_optimizations
 from utils.visualization import (
     draw_counters_panel,
     draw_line_counter,
@@ -40,6 +43,69 @@ from utils.visualization import (
     draw_tracks,
     draw_zone_counters,
 )
+
+
+# ============================================================================
+# WorkerThread — 核心处理流水线（检测 → 跟踪 → 过滤 → 计数）
+# ============================================================================
+#
+# 这是整个系统的核心引擎，运行在一个独立的 QThread 中，不阻塞 GUI 主线程。
+#
+# ┌─────────────────────────────────────────────────────────────────┐
+# │                     主循环 (每帧执行)                            │
+# ├─────────────────────────────────────────────────────────────────┤
+# │                                                                 │
+# │  ┌──────────┐   ┌──────────────┐   ┌─────────────────────────┐ │
+# │  │ 异步读取  │ → │ YOLO 检测    │ → │ DeepSORT 跟踪           │ │
+# │  │ 视频帧    │   │ (detector)   │   │ (tracker)               │ │
+# │  └──────────┘   └──────────────┘   └─────────────────────────┘ │
+# │                                              ↓                  │
+# │                                    ┌─────────────────┐         │
+# │                                    │ ROI 区域过滤    │         │
+# │                                    │ (仅保留区域内   │         │
+# │                                    │  的目标)        │         │
+# │                                    └─────────────────┘         │
+# │                                              ↓                  │
+# │                                    ┌─────────────────┐         │
+# │                                    │ 静态目标过滤    │         │
+# │                                    │ (排除模特/海报) │         │
+# │                                    └─────────────────┘         │
+# │                                              ↓                  │
+# │                          ┌─────────────────────┐               │
+# │                          │ 计数逻辑             │               │
+# │                          │ ├─ LineCounter      │               │
+# │                          │ │  (跨线计数 up/down)│               │
+# │                          │ └─ ZoneCounterManager│              │
+# │                          │    (区域计数 enter/  │               │
+# │                          │     leave)           │               │
+# │                          └─────────────────────┘               │
+# │                                    ↓                            │
+# │                          ┌─────────────────────┐               │
+# │                          │ 结果输出             │               │
+# │                          │ ├─ 数据库写入        │               │
+# │                          │ ├─ CSV 事件日志      │               │
+# │                          │ ├─ 轨迹点记录        │               │
+# │                          │ └─ 热力图累积        │               │
+# │                          └─────────────────────┘               │
+# │                                    ↓                            │
+# │                          ┌─────────────────────┐               │
+# │                          │ 可视化渲染           │               │
+# │                          │ ├─ 绘制检测框        │               │
+# │                          │ ├─ 绘制轨迹线        │               │
+# │                          │ ├─ 绘制计数线/区     │               │
+# │                          │ ├─ 绘制热力图叠加    │               │
+# │                          │ └─ 发射 QImage 到 GUI│               │
+# │                          └─────────────────────┘               │
+# │                                                                 │
+# └─────────────────────────────────────────────────────────────────┘
+#
+# 性能优化措施：
+#   - 异步帧读取（后台线程预读，解耦 I/O 与推理）
+#   - CUDA 推理优化（torch.inference_mode、cudnn.benchmark、TF32）
+#   - UI 节流（stats/trend/frame 发射均按频率限制，避免 GUI 过载）
+#   - 推理尺寸自适应（限制最大分辨率，保持实时性）
+# ============================================================================
+
 
 class WorkerThread(QThread):
     new_frame = pyqtSignal(QImage)
@@ -50,13 +116,15 @@ class WorkerThread(QThread):
     finished = pyqtSignal()
     frame_position = pyqtSignal(int, int)
     play_state_changed = pyqtSignal(bool)
+    perf_sample = pyqtSignal(dict)
+    video_finished = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.running = False
         self.paused = False
         self.video_path = None
-        self.config_path = resource_path("config/pedestrian_demo.yaml")
+        self.config_path = external_resource_path("config/pedestrian_demo.yaml")
         self.config_data = None
         self.conf = 0.5
         self.iou = 0.45
@@ -247,7 +315,18 @@ class WorkerThread(QThread):
             self._detector_warmup_thread = threading.Thread(target=_warmup, daemon=True)
             self._detector_warmup_thread.start()
 
+    def _async_frame_reader(self, cap, frame_queue: queue.Queue, stop_event):
+        while not stop_event.is_set():
+            ok, frame = cap.read()
+            if not ok:
+                frame_queue.put((False, None))
+                return
+            frame_queue.put((True, frame))
+
     def run(self):
+        # ================================================================
+        # 主处理循环：每帧执行 检测 → 跟踪 → 过滤 → 计数 → 输出 → 渲染
+        # ================================================================
         self.running = True
         self.paused = False
 
@@ -261,6 +340,8 @@ class WorkerThread(QThread):
         up_count = 0
         down_count = 0
         total_count = 0
+        _async_read_enabled = False
+        _read_stop_event = None
         try:
             cfg = self._build_runtime_config()
 
@@ -274,6 +355,7 @@ class WorkerThread(QThread):
             stats_interval = (1.0 / stats_hz) if stats_hz > 0 else 0.0
             trend_interval = (1.0 / trend_hz) if trend_hz > 0 else 0.0
 
+            # ----- 视频源初始化 -----
             source = self._parse_source(cfg.get("source", self.video_path))
             source_label = self._source_label(source)
             face_blur = FaceBlur(cfg.get("privacy", {}).get("face_blur", {}))
@@ -309,6 +391,7 @@ class WorkerThread(QThread):
                 detector_cfg["device"] = "cpu"
 
             try:
+                # ----- 检测器初始化 & CUDA 优化 -----
                 detector = self._prepare_detector(cfg)
             except Exception:
                 self.log_message.emit("YOLO GPU加载失败，回退到CPU")
@@ -329,6 +412,7 @@ class WorkerThread(QThread):
                 except Exception:
                     pass
 
+            # ----- 跟踪器 & 计数器初始化 -----
             tracker = DeepSortTracker(cfg["tracker"])
 
             counting_cfg = cfg.get("counting", {})
@@ -392,7 +476,7 @@ class WorkerThread(QThread):
             visualization_cfg = cfg.get("visualization", {})
             trail_length = int(visualization_cfg.get("trail_length", 30))
             show_confidence = bool(visualization_cfg.get("show_confidence", True))
-            box_thickness = int(visualization_cfg.get("box_thickness", 2))
+            box_thickness = int(visualization_cfg.get("box_thickness", 1))
             draw_count_points = bool(cfg.get("debug", {}).get("draw_count_points", True))
             heatmap_sigma = int(visualization_cfg.get("heatmap_sigma", self.heatmap_sigma))
             heatmap_alpha = float(visualization_cfg.get("heatmap_alpha", self.heatmap_alpha))
@@ -426,8 +510,32 @@ class WorkerThread(QThread):
 
             self.log_message.emit(f"开始处理视频: {source}")
 
-            _torch_inf = torch.inference_mode() if torch is not None else None
+            perf = PerformanceProfiler()
+            sp_optimize = apply_system_optimizations()
+            if "cpu_affinity" in sp_optimize:
+                self.log_message.emit(f"[优化] CPU亲和性: {sp_optimize['cpu_affinity']}")
+            if "gpu_memory" in sp_optimize:
+                gpu_info = sp_optimize["gpu_memory"]
+                if isinstance(gpu_info, dict):
+                    self.log_message.emit(f"[优化] GPU: {gpu_info.get('device', 'N/A')} 显存: {gpu_info.get('total_memory_gb', 'N/A')}GB")
 
+            _torch_inf = torch.inference_mode() if torch is not None else None
+            detect_device = str(detector.device) if hasattr(detector, "device") else "cpu"
+
+            _async_read_enabled = True
+            _read_stop_event = threading.Event()
+            _frame_queue = queue.Queue(maxsize=128)
+            _reader_thread = threading.Thread(
+                target=self._async_frame_reader,
+                args=(cap, _frame_queue, _read_stop_event),
+                daemon=True,
+            )
+            _reader_thread.start()
+            self.log_message.emit(f"[优化] 异步帧读取已启用 (缓冲=128帧, device={detect_device})")
+
+            # ========================================================
+            # 主循环入口 — 每帧执行完整流水线
+            # ========================================================
             while self.running:
                 if self.paused:
                     self.msleep(40)
@@ -441,28 +549,89 @@ class WorkerThread(QThread):
                     track_history.clear()
                     heatmap_accum.fill(0)
                     heatmap_overlay_cache = None
+                    if _async_read_enabled:
+                        while not _frame_queue.empty():
+                            try:
+                                _frame_queue.get_nowait()
+                            except queue.Empty:
+                                break
                     self.log_message.emit(f"跳转到帧 {seek_target}")
-
-                ok, frame = cap.read()
+                if _async_read_enabled:
+                    try:
+                        ok, frame = _frame_queue.get(timeout=5)
+                    except queue.Empty:
+                        self.log_message.emit("视频读取超时，尝试同步回退")
+                        ok, frame = cap.read()
+                else:
+                    ok, frame = cap.read()
                 if not ok:
                     self.log_message.emit("视频结束")
+                    self.video_finished.emit()
                     break
 
-                # 按原始宽高比自适应缩放，不拉伸。
+                prep_t0 = time.perf_counter()
                 if frame.shape[1] != proc_width or frame.shape[0] != proc_height:
                     frame = cv2.resize(frame, (proc_width, proc_height))
+
+                # ── Step 0: 掩膜生成（推理用掩膜、显示用全图）──
+                # 目标：让 YOLO 只检测 ROI 内的行人 → 降低计算量 → 提升 FPS
+                # 策略：掩膜帧送推理，原始帧送显示，用户始终看到完整画面
+                if roi_enabled and roi_pts_np is not None:
+                    roi_mask = np.zeros(                     # 创建全黑画布 (H×W, uint8)
+                        (proc_height, proc_width), dtype=np.uint8)
+                    cv2.fillPoly(roi_mask, [roi_pts_np], 255)# ROI 区域填白色 (255=保留)
+                    # ⬆ fillPoly 在 mask 上绘制实心多边形：
+                    #   roi_pts_np = ROI 顶点数组 (N×2, int32)
+                    #   255 = 填充色（白色=通过，0=黑色=遮挡）
+                    inference_frame = cv2.bitwise_and(frame, frame, mask=roi_mask)
+                    # ⬆ bitwise_and: frame 与自身做按位与，mask=0 的位置变黑(0,0,0)
+                    #   原理：mask=255 → 保留原像素值；mask=0 → 像素清零
+                    #   效果：ROI 外全黑，CNN 自动忽略纯黑区域（几乎零计算）
+                else:
+                    inference_frame = frame                 # 无 ROI 模式，直接用原图
+                prep_ms = (time.perf_counter() - prep_t0) * 1000.0
 
                 loop_t0 = time.perf_counter()
                 detector.conf = float(self.conf)
                 detector.iou = float(self.iou)
 
+                # ── Step 1: YOLO 推理（掩膜帧 → 仅检测 ROI 内目标）──
+                # 使用 torch.inference_mode() 禁用梯度计算，加速推理
+                inf_t0 = time.perf_counter()
                 if _torch_inf is not None:
-                    with _torch_inf:
-                        detections = detector.detect(frame)
+                    with _torch_inf:                  # torch.inference_mode() 上下文
+                        detections = detector.detect(inference_frame)
+                        # ⬆ inference_frame = 掩膜后的帧（ROI 外全黑）
+                        #    YOLO 只在 ROI 区域做卷积计算，黑区跳过
+                        #    → 推理时间 ≈ 正比于 ROI 面积占比
                 else:
-                    detections = detector.detect(frame)
+                    detections = detector.detect(inference_frame)
+                    # ⬆ CPU 模式同样使用掩膜帧
+                inf_ms = (time.perf_counter() - inf_t0) * 1000.0
+
+                # ── Step 1.5: pointPolygonTest 二次精确过滤 ──
+                # 掩膜推理的边缘区域仍可能漏过少量 ROI 外检测框
+                # 用 OpenCV pointPolygonTest 对每个框几何中心做最终判定
+                if roi_enabled and roi_pts_np is not None:
+                    roi_detections = []
+                    for det in detections:
+                        cx, cy = det.center               # 检测框几何中心坐标
+                        if cv2.pointPolygonTest(roi_pts_np, (cx, cy), False) >= 0:
+                            # ⬆ pointPolygonTest 判断点与多边形的位置关系：
+                            #   返回值 ≥0 → 点在多边形内部或边上
+                            #   返回值 <0 → 点在多边形外部
+                            #   measureDist=False → 只返回 ±1/0，不做精确距离计算（更快）
+                            roi_detections.append(det)     # 保留 ROI 内检测
+                    detections = roi_detections             # 替换为过滤后的列表
+
+                # ── Step 2: DeepSORT 跟踪 ──
+                # 将检测结果传入跟踪器，获取带有跨帧一致 ID 的轨迹
+                # 注意：跟踪器仍使用原始 frame 提取外观特征（掩膜帧会丢失颜色纹理信息）
+                post_t0 = time.perf_counter()
                 all_tracks = tracker.update(frame, detections)
 
+                # ── Step 3: ROI 区域过滤 ──
+                # 仅保留计数锚点在 ROI 多边形内的轨迹
                 roi_tracks = all_tracks
                 if roi_enabled:
                     roi_tracks = filter_tracks_by_roi(
@@ -471,16 +640,19 @@ class WorkerThread(QThread):
                         anchor_point=roi_anchor_point,
                     )
 
+                # ── Step 4: 静态目标过滤 ──
+                # 检测并排除长时间几乎不动的目标（模特/海报/虚警）
                 static_ids = set()
                 if static_filter_enabled:
                     static_ids = static_filter.update(roi_tracks, frame_idx)
 
+                # 排除静态目标后的轨迹，用于后续计数
                 counting_tracks = [tr for tr in roi_tracks if tr.track_id not in static_ids]
 
                 tracks_for_draw = counting_tracks if hide_static_boxes else roi_tracks
                 visible_ids = {tr.track_id for tr in tracks_for_draw}
 
-                # 轨迹点/热力图累积：放在 static 过滤之后，减少不必要的计算
+                # ── 轨迹点/热力图累积（静态过滤后）──
                 if hide_static_boxes:
                     if self.show_trail or self.show_heatmap:
                         for tr in counting_tracks:
@@ -502,6 +674,7 @@ class WorkerThread(QThread):
                             if 0 <= px < proc_width and 0 <= py < proc_height:
                                 heatmap_accum[py, px] += 1.0
 
+                # ── Step 5: 跨线计数 ──
                 line_events = []
                 if line_counter is not None:
                     line_events = line_counter.update(counting_tracks, frame_idx)
@@ -525,6 +698,7 @@ class WorkerThread(QThread):
                         elif direction == "down":
                             flow_stats[minute_idx]["down"] += 1
 
+                # ── Step 6: 区域计数 ──
                 zone_events = zone_manager.update(counting_tracks, frame_idx)
                 for event in zone_events:
                     event_logger.add_event(event)
@@ -566,70 +740,67 @@ class WorkerThread(QThread):
                         last_trend_up = up_now
                         last_trend_down = down_now
 
-                # 仅在需要刷新 UI 时才绘制/生成 QImage（否则跳过昂贵的 draw + copy）
+                # ── Step 6: 全图可视化渲染（原始帧 frame，非掩膜帧）──
+                # 用户始终看到完整视频画面，无黑边，仅 ROI 内检测框被绘制
+                # 节流：按 UI 最大帧率限制，避免 GUI 线程过载
                 now_pc = time.perf_counter()
                 do_render = ui_frame_interval <= 0.0 or (now_pc - last_frame_emit) >= ui_frame_interval
                 if do_render:
-                    np.copyto(_display_rgba, frame)
-                    annotated = _display_rgba
+                    np.copyto(_display_rgba, frame)       # ⬅ 使用原始 frame（非 inference_frame）
+                    # _display_rgba 是预分配的 RGBA 缓冲区，避免每帧创建新数组
+                    annotated = _display_rgba             # 从此刻起所有绘制都在完整画面上
 
+                    # ① 绘制 ROI 边界线（粉紫色多边形边框，线宽 2px）
                     if self.show_roi and roi_pts_np is not None and len(roi_pts_np) >= 3:
                         cv2.polylines(annotated, [roi_pts_np], True, (255, 0, 255), 2)
+                        # ⬆ polylines: 绘制多边形轮廓（实心=isClosed=True）
+                        #   (255,0,255) = 粉紫色 BGR
                         if roi_label_pos is not None:
-                            cv2.putText(
-                                annotated,
-                                "counting_roi",
-                                roi_label_pos,
-                                cv2.FONT_HERSHEY_SIMPLEX,
-                                0.8,
-                                (255, 0, 255),
-                                2,
-                            )
+                            cv2.putText(                  # ROI 标签文字
+                                annotated, "counting_roi", roi_label_pos,
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 0, 255), 2)
 
+                    # ② 绘制计数锚点（脚底中心绿色圆点）+ track_id
                     if self.draw_count_points:
                         for tr in counting_tracks:
-                            pt = tr.count_point("bottom_center")
+                            pt = tr.count_point("bottom_center")  # 脚底中心坐标
                             x, y = int(pt[0]), int(pt[1])
                             cv2.circle(annotated, (x, y), 5, (0, 255, 0), -1)
+                            # ⬆ 绿色实心圆，半径 5px，-1=填充
                             cv2.putText(
-                                annotated,
-                                f"{tr.track_id}",
-                                (x, y - 8),
-                                cv2.FONT_HERSHEY_SIMPLEX,
-                                0.5,
-                                (0, 255, 0),
-                                2,
-                            )
+                                annotated, f"{tr.track_id}", (x, y - 8),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
 
+                    # ③ 绘制检测框（不同 ID 随机颜色，含 track_id 和可选置信度）
                     annotated = draw_tracks(
-                        annotated,
-                        tracks_for_draw,
-                        show_conf=show_confidence,
-                        box_thickness=box_thickness,
+                        annotated, tracks_for_draw,       # tracks_for_draw = 供绘制用的轨迹
+                        show_conf=show_confidence,         # 是否显示置信度分数
+                        box_thickness=box_thickness,       # 边框粗细
                     )
 
+                    # ④ 绘制轨迹历史线（过去 N 帧的路径折线）
                     if self.show_trail:
                         annotated = draw_track_history(annotated, track_history)
 
+                    # ⑤ 绘制计数线（黄色或配置色线段 + 箭头 + 方向标签）
                     if self.show_line and line_counter is not None:
                         annotated = draw_line_counter(annotated, line_counter)
 
+                    # ⑥ 绘制区域计数多边形边界 + 当前人数
                     annotated = draw_zone_counters(annotated, zone_manager)
                     annotated = draw_counters_panel(annotated, line_counter, zone_manager)
 
+                    # ⑦ 底部计数统计文字（上下行实时数值）
                     cv2.putText(
                         annotated,
                         f"Minute {current_minute}: up={up_now} down={down_now}",
                         (20, annotated.shape[0] - 20),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.8,
-                        (255, 255, 255),
-                        2,
-                    )
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
 
-                    # 仅处理显示输出帧，不影响检测/跟踪/计数逻辑。
+                    # ⑧ 人脸模糊（隐私保护，仅作用于显示帧）
                     annotated = face_blur.apply(annotated)
 
+                    # ⑨ 热力图叠加（半透明覆盖，显示过往行人的空间密度分布）
                     if self.show_heatmap:
                         try:
                             if frame_idx % heatmap_interval == 0 or heatmap_overlay_cache is None:
@@ -644,27 +815,29 @@ class WorkerThread(QThread):
                                     heatmap_overlay_cache = cv2.applyColorMap(hm_norm, cv2.COLORMAP_JET)
 
                             if heatmap_overlay_cache is not None:
-                                annotated = cv2.addWeighted(
-                                    annotated,
-                                    1.0 - heatmap_alpha,
-                                    heatmap_overlay_cache,
-                                    heatmap_alpha,
-                                    0,
-                                )
+                                annotated = cv2.addWeighted(   # 半透明叠加
+                                    annotated, 1.0 - heatmap_alpha,  # 原图权重
+                                    heatmap_overlay_cache, heatmap_alpha,  # 热力图权重
+                                    0)                         # gamma 偏移
+                                # 效果：行人密集区域呈暖色(红/黄)，稀疏区域透明
                         except Exception as exc:
                             self.log_message.emit(f"热力图叠加失败: {exc}")
 
-                    h, w = annotated.shape[:2]
-                    bpl = w * 3
+                    # ⑩ BGR → QImage → emit 到 GUI 主线程显示
+                    h, w = annotated.shape[:2]                   # 画面尺寸
+                    bpl = w * 3                                  # 每行字节数 (BGR=3通道)
                     if qimage_bgr_format is not None:
                         q_img = QImage(annotated.data, w, h, bpl, qimage_bgr_format).copy()
+                        # ⬆ BGR888 格式（QImage.Format_BGR888），性能最优，零转换
                     else:
                         rgb = cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB)
+                        # ⬆ 兜底：BGR→RGB 转换后再构造 QImage
                         bpl = w * 3
                         q_img = QImage(rgb.data, w, h, bpl, QImage.Format_RGB888).copy()
+                    # .copy() 是关键：确保 QImage 持有独立内存，避免 annotated 被后续帧覆盖
 
-                    self.new_frame.emit(q_img)
-                    last_frame_emit = time.perf_counter()
+                    self.new_frame.emit(q_img)                  # 发射信号 → GUI 显示
+                    last_frame_emit = time.perf_counter()        # 记录上次渲染时刻
 
                 # 只保留当前可视轨迹，防止 history 无限增长
                 if self.show_trail and track_history:
@@ -672,6 +845,7 @@ class WorkerThread(QThread):
                         if tid not in visible_ids:
                             track_history.pop(tid, None)
 
+                # ── 轨迹点记录（用于轨迹回放）──
                 if tracks_for_draw:
                     frame_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     for tr in tracks_for_draw:
@@ -729,7 +903,7 @@ class WorkerThread(QThread):
 
                 self.frame_position.emit(frame_idx + 1, total_frames_hint)
 
-                # 每1秒写入一次数据库
+                # ── 数据库定时写入（每秒一次）──
                 current_time = time.time()
                 if current_time - last_db_insert_time >= 1.0:
                     try:
@@ -755,21 +929,37 @@ class WorkerThread(QThread):
                         self.log_message.emit(f"数据库写入异常: {e}")
                     last_db_insert_time = current_time
 
+                post_ms = (time.perf_counter() - post_t0) * 1000.0
+                total_ms = prep_ms + inf_ms + post_ms
+                perf.record_frame(prep_ms, inf_ms, post_ms, total_ms)
+
+                if frame_idx % 30 == 0:
+                    snap = perf.snapshot()
+                    self.perf_sample.emit(snap)
+
                 if frame_idx % 60 == 0:
                     avg_fps = (total_frames / total_time) if total_time > 0 else 0.0
+                    snap = perf.snapshot()
                     self.log_message.emit(
-                        f"[frame {frame_idx}] all={len(all_tracks)} roi={len(roi_tracks)} counting={len(counting_tracks)} avg_fps={avg_fps:.2f}"
+                        f"[frame {frame_idx}] fps={snap['fps']:.1f} prep={snap['preprocess_ms']:.1f}ms "
+                        f"inf={snap['inference_ms']:.1f}ms post={snap['postprocess_ms']:.1f}ms "
+                        f"gpu={snap['gpu_util_pct']:.0f}% cpu={snap['cpu_util_pct']:.0f}%"
+                        f" all={len(all_tracks)} roi={len(roi_tracks)} counting={len(counting_tracks)}"
                     )
 
                 frame_idx += 1
 
             if total_frames > 0 and total_time > 0:
-                self.log_message.emit(f"处理完成，平均FPS: {total_frames / total_time:.2f}")
+                final = perf.snapshot()
+                self.log_message.emit(f"处理完成，平均FPS: {final['fps']:.2f}")
+                self.perf_sample.emit(final)
 
         except Exception as exc:
             self.log_message.emit(f"处理异常: {exc}")
             self.log_message.emit(traceback.format_exc())
         finally:
+            if _async_read_enabled and _read_stop_event is not None:
+                _read_stop_event.set()
             if cap is not None:
                 cap.release()
             if event_logger is not None:

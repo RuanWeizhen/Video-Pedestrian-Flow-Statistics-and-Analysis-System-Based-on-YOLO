@@ -30,7 +30,7 @@ class AuthDialog(QDialog):
     def _build_ui(self) -> None:
         root_layout = QVBoxLayout(self)
 
-        header = QLabel("行人客流统计系统入口")
+        header = QLabel("行人检测系统入口")
         header.setAlignment(Qt.AlignCenter)
         header.setStyleSheet("font-size: 20px; font-weight: 600;")
 
